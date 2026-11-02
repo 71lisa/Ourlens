@@ -1,36 +1,35 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OurLens
 
-## Getting Started
+OurLens gathers the photos, videos, and messages guests contribute at an event into one shared collection.
 
-First, run the development server:
+## Development
+
+Configure `.env` from `.env.example`, start PostgreSQL with `docker compose up -d`, apply checked-in migrations, and generate the Prisma Client:
 
 ```bash
+npx prisma migrate deploy
+npx prisma generate
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Organizers set an event start/end date and time in an IANA time zone when creating an event, and can update the schedule from the event dashboard. Guest contributions are accepted only from the scheduled start (inclusive) until the scheduled end (exclusive). Existing events without a valid schedule remain closed to uploads until an organizer sets one.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Guest photo uploads support JPEG, PNG, and WebP up to 8 MB. Video uploads support MP4 and MOV up to 100 MB, subject to the package's verified duration limit. HEIC, WebM, and in-app video recording are not supported. Guest uploads remain pending until an organizer approves them.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Organizer orders and payments
 
-## Learn More
+Creating an event creates a pending order and keeps the event in `DRAFT`. The package price and benefits are snapshotted on the order. The event becomes available only after the server verifies a Midtrans notification and confirms the current transaction status with Midtrans; the event's saved schedule still determines when guest contributions open.
 
-To learn more about Next.js, take a look at the following resources:
+Configure these server-only variables to enable Midtrans Sandbox checkout:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```env
+MIDTRANS_SERVER_KEY=your-sandbox-server-key
+MIDTRANS_ENVIRONMENT=sandbox
+NEXT_PUBLIC_APP_URL=https://your-public-https-host
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Set the Midtrans payment notification URL to `https://your-public-https-host/api/payments/midtrans/webhook`. Do not use the organizer return URL as payment confirmation. Production credentials and `MIDTRANS_ENVIRONMENT=production` are only for a separately configured production deployment.
 
-## Deploy on Vercel
+Package prices and benefits are read from the `Package` database records. A zero price means “not configured”, not a free package; configure the official IDR prices before accepting paid orders. No package price is supplied by the development seed.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Run `npm run lint`, `npx tsc --noEmit`, `npx vitest run`, `npx prisma validate`, and `npm run build` for validation. PostgreSQL integration tests run when `DATABASE_URL` is configured.

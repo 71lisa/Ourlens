@@ -1,0 +1,460 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  ORGANIZER
+  PARTNER
+  GUEST
+}
+
+enum EventStatus {
+  DRAFT
+  UPCOMING
+  LIVE
+  COMPLETED
+  ARCHIVED
+  EXPIRED
+}
+
+enum EventPrivacy {
+  PUBLIC_LINK
+  PRIVATE
+  UPLOAD_ONLY
+  MODERATED
+}
+
+enum EventType {
+  WEDDING
+  BIRTHDAY
+  GRADUATION
+  REUNION
+  CORPORATE
+  PARTY
+  SCHOOL
+  FAMILY
+  OTHER
+}
+
+enum MediaType {
+  PHOTO
+  VIDEO
+  LIVE_MOMENT
+}
+
+enum UploadStatus {
+  PENDING
+  UPLOADING
+  COMPLETE
+  FAILED
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETE
+  FAILED
+  SKIPPED
+}
+
+enum AiStatus {
+  NONE
+  QUEUED
+  PROCESSING
+  COMPLETE
+  FAILED
+}
+
+enum ModerationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  FLAGGED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  CANCELLED
+  EXPIRED
+}
+
+enum PartnerStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum EventAccessRole {
+  OWNER
+  MANAGER
+  VIEWER
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String?
+  name         String?
+  role         UserRole  @default(ORGANIZER)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  ownedEvents     Event[]             @relation("EventOwner")
+  orders          Order[]
+  partnerAccount  PartnerAccount?
+  partnerClients  PartnerClient[]
+  accessGrants    EventAccessGrant[]
+  memories        Memory[]            @relation("MemoryUploader")
+  mediaAssets     MediaAsset[]        @relation("MediaUploader")
+  moderationFlags ModerationFlag[]    @relation("FlagReporter")
+}
+
+model GuestSession {
+  id          String   @id @default(cuid())
+  tokenHash   String   @unique
+  eventId     String
+  displayName String?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  memories Memory[]
+
+  @@index([eventId])
+}
+
+model Package {
+  id                    String   @id @default(cuid())
+  name                  String
+  price                 Decimal  @db.Decimal(12, 2)
+  currency              String   @default("IDR")
+  storageLimitBytes     BigInt
+  photoLimit            Int?
+  videoLimit            Int?
+  videoDurationLimit    Int?
+  eventDurationDays     Int
+  retentionDays         Int
+  customEventPage       Boolean  @default(false)
+  customQRCode          Boolean  @default(false)
+  filtersEnabled        Boolean  @default(false)
+  framesEnabled         Boolean  @default(false)
+  aiEnhancementEnabled  Boolean  @default(false)
+  aiCurationEnabled     Boolean  @default(false)
+  digitalAlbumEnabled   Boolean  @default(false)
+  liveMomentEnabled     Boolean  @default(false)
+  eventChallengesEnabled Boolean @default(false)
+  isActive              Boolean  @default(false)
+  metadata              Json?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  events Event[]
+  orders Order[]
+}
+
+model Event {
+  id            String        @id @default(cuid())
+  ownerId       String
+  packageId     String?
+  name          String
+  slug          String        @unique
+  description   String?
+  eventType     EventType     @default(WEDDING)
+  eventDate     DateTime?
+  startsAt      DateTime?
+  endsAt        DateTime?
+  timeZone      String?
+  location      String?
+  coverImageKey String?
+  status        EventStatus   @default(DRAFT)
+  privacyMode   EventPrivacy  @default(PUBLIC_LINK)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  expiresAt     DateTime?
+
+  owner          User                 @relation("EventOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  package        Package?             @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  customization  EventCustomization?
+  qrCode         QRCode?
+  storageUsage   StorageUsage?
+  guestSessions  GuestSession[]
+  memories       Memory[]
+  mediaAssets    MediaAsset[]
+  challenges     Challenge[]
+  albums         Album[]
+  orders         Order[]
+  accessGrants   EventAccessGrant[]
+
+  @@index([ownerId])
+  @@index([status])
+}
+
+model EventCustomization {
+  id          String   @id @default(cuid())
+  eventId     String   @unique
+  welcomeTitle String?
+  welcomeMessage String?
+  accentColor String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+}
+
+model QRCode {
+  id             String   @id @default(cuid())
+  eventId        String   @unique
+  destinationUrl String
+  scanCount      Int      @default(0)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+}
+
+model StorageUsage {
+  id         String   @id @default(cuid())
+  eventId    String   @unique
+  quotaBytes BigInt
+  usedBytes  BigInt   @default(0)
+  photoBytes BigInt   @default(0)
+  videoBytes BigInt   @default(0)
+  otherBytes BigInt   @default(0)
+  updatedAt  DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+}
+
+model Memory {
+  id              String   @id @default(cuid())
+  eventId         String
+  uploaderId      String?
+  guestSessionId  String?
+  caption         String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  uploader      User?          @relation("MemoryUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
+  guestSession  GuestSession?  @relation(fields: [guestSessionId], references: [id], onDelete: SetNull)
+  mediaAssets   MediaAsset[]
+  albumItems    AlbumItem[]
+  challengeSubs ChallengeSubmission[]
+  flags         ModerationFlag[]
+
+  @@index([eventId])
+}
+
+model MediaAsset {
+  id                    String            @id @default(cuid())
+  eventId               String
+  memoryId              String?
+  uploaderId            String?
+  idempotencyKey        String?
+  type                  MediaType
+  originalStorageKey    String
+  optimizedStorageKey   String?
+  thumbnailStorageKey   String?
+  mimeType              String
+  fileSize              BigInt
+  width                 Int?
+  height                Int?
+  duration              Float?
+  uploadStatus          UploadStatus      @default(PENDING)
+  processingStatus      ProcessingStatus  @default(PENDING)
+  aiStatus              AiStatus          @default(NONE)
+  moderationStatus      ModerationStatus  @default(PENDING)
+  caption               String?
+  createdAt             DateTime          @default(now())
+  expiresAt             DateTime?
+
+  event      Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  memory     Memory?         @relation(fields: [memoryId], references: [id], onDelete: SetNull)
+  uploader   User?           @relation("MediaUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
+  aiJobs     AIMediaJob[]
+  flags      ModerationFlag[]
+
+  @@index([eventId])
+  @@index([memoryId])
+  @@unique([eventId, idempotencyKey])
+}
+
+model Challenge {
+  id          String   @id @default(cuid())
+  eventId     String
+  title       String
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event       Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  submissions ChallengeSubmission[]
+
+  @@index([eventId])
+}
+
+model ChallengeSubmission {
+  id          String   @id @default(cuid())
+  challengeId String
+  memoryId    String
+  createdAt   DateTime @default(now())
+
+  challenge Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  memory    Memory    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([challengeId])
+}
+
+model Album {
+  id          String   @id @default(cuid())
+  eventId     String
+  title       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  items AlbumItem[]
+
+  @@index([eventId])
+}
+
+model AlbumItem {
+  id        String @id @default(cuid())
+  albumId   String
+  memoryId  String
+  sortOrder Int    @default(0)
+
+  album  Album  @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([albumId])
+}
+
+model AIMediaJob {
+  id           String    @id @default(cuid())
+  mediaAssetId String
+  jobType      String
+  provider     String?
+  status       AiStatus  @default(QUEUED)
+  payload      Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  mediaAsset MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+
+  @@index([mediaAssetId])
+}
+
+model ModerationFlag {
+  id           String           @id @default(cuid())
+  mediaAssetId String?
+  memoryId     String?
+  reason       String
+  status       ModerationStatus @default(PENDING)
+  reporterId   String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  mediaAsset MediaAsset? @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+  memory     Memory?     @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  reporter   User?       @relation("FlagReporter", fields: [reporterId], references: [id], onDelete: SetNull)
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique
+  idempotencyKey  String      @unique
+  userId          String
+  packageId       String
+  eventId         String?     @unique
+  packageSnapshot Json
+  status          OrderStatus @default(PENDING)
+  amount          Decimal     @db.Decimal(12, 2)
+  currency        String
+  expiresAt       DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  package  Package   @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  event    Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  payments Payment[]
+
+  @@index([userId, createdAt])
+}
+
+model Payment {
+  id                 String        @id @default(cuid())
+  orderId            String
+  provider           String
+  providerRef        String?       @unique
+  checkoutUrl        String?
+  checkoutRequestedAt DateTime?
+  status             PaymentStatus @default(PENDING)
+  amount             Decimal       @db.Decimal(12, 2)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, provider])
+}
+
+model PartnerAccount {
+  id           String         @id @default(cuid())
+  userId       String         @unique
+  businessName String
+  status       PartnerStatus  @default(PENDING)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clients PartnerClient[]
+}
+
+model PartnerClient {
+  id               String   @id @default(cuid())
+  partnerAccountId String
+  organizerUserId  String
+  createdAt        DateTime @default(now())
+
+  partnerAccount PartnerAccount @relation(fields: [partnerAccountId], references: [id], onDelete: Cascade)
+  organizer      User           @relation(fields: [organizerUserId], references: [id], onDelete: Cascade)
+
+  @@index([partnerAccountId])
+}
+
+model EventAccessGrant {
+  id        String          @id @default(cuid())
+  eventId   String
+  userId    String
+  role      EventAccessRole @default(MANAGER)
+  createdAt DateTime        @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([userId])
+}

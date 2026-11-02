@@ -1,0 +1,4 @@
+ALTER TABLE "Event"
+ADD COLUMN "startsAt" TIMESTAMP(3),
+ADD COLUMN "endsAt" TIMESTAMP(3),
+ADD COLUMN "timeZone" TEXT;
