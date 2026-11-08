@@ -1,5 +1,6 @@
 import type { NextAuthConfig } from "next-auth";
 import type { UserRole } from "@/types/domain";
+import { getSafeAuthRedirect, getSignInRedirect } from "@/lib/auth-redirect";
 
 export const authConfig = {
   trustHost: true,
@@ -11,16 +12,28 @@ export const authConfig = {
   },
   providers: [],
   callbacks: {
+    redirect({ url, baseUrl }) {
+      return getSafeAuthRedirect(url, baseUrl);
+    },
     authorized({ auth, request }) {
       const pathname = request.nextUrl.pathname;
       const role = (auth?.user as { role?: UserRole } | undefined)?.role;
 
       if (pathname.startsWith("/admin")) {
-        return role === "ADMIN";
+        return role === "ADMIN" || getSignInRedirect(request.url);
       }
 
       if (pathname.startsWith("/dashboard")) {
-        return role === "ADMIN" || role === "ORGANIZER" || role === "PARTNER";
+        return role === "ADMIN" || role === "ORGANIZER" || role === "PARTNER" ||
+          getSignInRedirect(request.url);
+      }
+
+      if (pathname === "/partner/apply") {
+        return true;
+      }
+
+      if (pathname.startsWith("/partner")) {
+        return Boolean(auth?.user) || getSignInRedirect(request.url);
       }
 
       return true;

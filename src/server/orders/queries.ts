@@ -19,7 +19,20 @@ export async function getOrganizerOrder(orderId: string, userId: string) {
   return prisma.order.findFirst({
     where: { id: orderId, userId },
     include: {
-      event: { select: { id: true, name: true, status: true, slug: true } },
+      event: {
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          slug: true,
+          coverImageKey: true,
+          eventDate: true,
+          startsAt: true,
+          timeZone: true,
+          location: true,
+          eventType: true,
+        },
+      },
       payments: {
         where: { provider: "MIDTRANS" },
         select: { status: true, checkoutUrl: true, providerRef: true, updatedAt: true },

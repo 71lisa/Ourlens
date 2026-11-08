@@ -11,7 +11,7 @@ export class AppError extends Error {
   }) {
     super(options.message);
     this.name = "AppError";
-    this.userMessage = options.userMessage ?? "Something went wrong. Please try again.";
+    this.userMessage = options.userMessage ?? "Terjadi kesalahan. Silakan coba lagi.";
     this.statusCode = options.statusCode ?? 500;
     this.code = options.code ?? "INTERNAL_ERROR";
   }
@@ -21,7 +21,7 @@ export function toUserError(error: unknown): string {
   if (error instanceof AppError) {
     return error.userMessage;
   }
-  return "Something went wrong. Please try again.";
+  return "Terjadi kesalahan. Silakan coba lagi.";
 }
 
 export function logError(error: unknown, context?: string) {

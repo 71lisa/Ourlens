@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => {
   const state = {
     event: {
       id: "event-1",
+      name: "Audrey's Party",
+      eventDate: new Date("2026-11-06T12:00:00.000Z"),
       privacyMode: "MODERATED",
       status: "LIVE",
       expiresAt: null as Date | null,
@@ -11,13 +13,16 @@ const mocks = vi.hoisted(() => {
       endsAt: new Date(Date.now() + 60_000),
       timeZone: "UTC",
       orders: [{ id: "paid-order" }],
+      freeTrial: null as { photoLimit: number } | null,
       package: {
+        name: "5 tamu",
+        guestCapacity: 5,
+        isUnlimited: false,
         retentionDays: 30,
         photoLimit: 10,
-        videoLimit: 5,
-        videoDurationLimit: 10,
       },
       storageUsage: { id: "usage-1" },
+      photoExperience: { filter: "RETRO", frame: "POLAROID_WHITE" },
     },
     usage: {
       quotaBytes: 1024n,
@@ -43,6 +48,10 @@ const mocks = vi.hoisted(() => {
       state.stored.delete(key);
     }),
   };
+  const photoProcessor = {
+    renderGuestPhoto: vi.fn(async ({ bytes }: { bytes: Uint8Array }) => new Uint8Array(bytes)),
+    InvalidPhotoError: class InvalidPhotoError extends Error {},
+  };
 
   const prisma = {
     event: {
@@ -52,6 +61,18 @@ const mocks = vi.hoisted(() => {
       findFirst: vi.fn(async ({ where }: { where: { eventId: string; tokenHash: string } }) => {
         const session = state.sessions.get(where.tokenHash);
         return session?.eventId === where.eventId ? { id: session.id } : null;
+      }),
+      count: vi.fn(async ({ where }: { where: { eventId: string } }) => {
+        const participatingSessions = new Set(
+          state.assets
+            .filter((asset) =>
+              asset.eventId === where.eventId &&
+              asset.type === "PHOTO" &&
+              asset.uploadStatus === "COMPLETE"
+            )
+            .map((asset) => asset.guestSessionId),
+        );
+        return participatingSessions.size;
       }),
     },
     challenge: {
@@ -87,11 +108,33 @@ const mocks = vi.hoisted(() => {
               asset.eventId === eventId && asset.idempotencyKey === idempotencyKey
             ) ?? null;
           }),
-          count: vi.fn(async ({ where }: { where: { eventId: string; type: string } }) =>
+          count: vi.fn(async ({ where }: { where: {
+            eventId: string;
+            type: string;
+            uploadStatus?: string;
+            memory?: { is: { guestSessionId: string } };
+          } }) =>
             state.assets.filter((asset) =>
-              asset.eventId === where.eventId && asset.type === where.type
+              asset.eventId === where.eventId &&
+              asset.type === where.type &&
+              (!where.uploadStatus || asset.uploadStatus === where.uploadStatus) &&
+              (!where.memory || asset.guestSessionId === where.memory.is.guestSessionId)
             ).length
           ),
+        },
+        guestSession: {
+          count: vi.fn(async ({ where }: { where: { eventId: string } }) => {
+            const participatingSessions = new Set(
+              state.assets
+                .filter((asset) =>
+                  asset.eventId === where.eventId &&
+                  asset.type === "PHOTO" &&
+                  asset.uploadStatus === "COMPLETE"
+                )
+                .map((asset) => asset.guestSessionId),
+            );
+            return participatingSessions.size;
+          }),
         },
         event: {
           findUnique: vi.fn(async () => state.event),
@@ -102,6 +145,7 @@ const mocks = vi.hoisted(() => {
             const asset = {
               ...created.create,
               eventId: state.event.id,
+              guestSessionId: (data.guestSession as { connect: { id: string } }).connect.id,
               id: `asset-${state.assets.length + 1}`,
             };
             state.assets.push(asset);
@@ -125,11 +169,13 @@ const mocks = vi.hoisted(() => {
     }),
   };
 
-  return { state, storage, prisma };
+  return { state, storage, prisma, photoProcessor };
 });
 
 vi.mock("@/server/db/prisma", () => ({ prisma: mocks.prisma }));
 vi.mock("@/services/storage", () => ({ getStorageService: () => mocks.storage }));
+vi.mock("@/services/media/image-processing/server", () => mocks.photoProcessor);
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
 import { POST } from "@/app/api/events/[slug]/memories/route";
 import { createGuestToken, hashGuestToken } from "@/lib/guest-token";
@@ -205,10 +251,11 @@ function makeRequest(input: {
   originalMimeType?: string;
   token?: string;
   sessionEventId?: string;
+  sessionId?: string;
 }) {
   const token = input.token ?? createGuestToken();
   mocks.state.sessions.set(hashGuestToken(token), {
-    id: "guest-session-1",
+    id: input.sessionId ?? `guest-session-${hashGuestToken(token)}`,
     eventId: input.sessionEventId ?? mocks.state.event.id,
     expiresAt: new Date(Date.now() + 60_000),
   });
@@ -249,6 +296,8 @@ describe("guest media upload API", () => {
   beforeEach(() => {
     Object.assign(mocks.state.event, {
       id: "event-1",
+      name: "Audrey's Party",
+      eventDate: new Date("2026-11-06T12:00:00.000Z"),
       privacyMode: "MODERATED",
       status: "LIVE",
       expiresAt: null,
@@ -256,13 +305,16 @@ describe("guest media upload API", () => {
       endsAt: new Date(Date.now() + 60_000),
       timeZone: "UTC",
       orders: [{ id: "paid-order" }],
+      freeTrial: null,
       package: {
+        name: "5 tamu",
+        guestCapacity: 5,
+        isUnlimited: false,
         retentionDays: 30,
         photoLimit: 10,
-        videoLimit: 5,
-        videoDurationLimit: 10,
       },
       storageUsage: { id: "usage-1" },
+      photoExperience: { filter: "RETRO", frame: "POLAROID_WHITE" },
     });
     mocks.state.usage.quotaBytes = 1024n;
     mocks.state.usage.usedBytes = 0n;
@@ -277,7 +329,7 @@ describe("guest media upload API", () => {
     resetRateLimits();
   });
 
-  it("persists an approved-flow photo as pending with original and edited variants", async () => {
+  it("persists photos as published and applies the saved event style to the original", async () => {
     const response = await post({
       kind: "photo",
       media: bytes(0xff, 0xd8, 0xff, 0x00, 0x01),
@@ -290,7 +342,7 @@ describe("guest media upload API", () => {
     expect(mocks.state.assets[0]).toMatchObject({
       type: "PHOTO",
       uploadStatus: "COMPLETE",
-      moderationStatus: "PENDING",
+      moderationStatus: "APPROVED",
       mimeType: "image/jpeg",
     });
     expect(mocks.state.assets[0]).toMatchObject({
@@ -299,12 +351,19 @@ describe("guest media upload API", () => {
     });
     expect(mocks.state.memories[0]).toMatchObject({
       event: { connect: { id: "event-1" } },
-      guestSession: { connect: { id: "guest-session-1" } },
+      guestSession: { connect: { id: expect.any(String) } },
       caption: null,
     });
     expect(mocks.state.stored.size).toBe(2);
-    expect(mocks.state.usage.photoBytes).toBe(9n);
+    expect(mocks.state.usage.photoBytes).toBe(8n);
     expect(mocks.state.usage.videoBytes).toBe(0n);
+    expect(mocks.photoProcessor.renderGuestPhoto).toHaveBeenCalledWith({
+      bytes: bytes(0xff, 0xd8, 0xff, 0x02),
+      filter: "RETRO",
+      frame: "POLAROID_WHITE",
+      eventName: "Audrey's Party",
+      eventDate: new Date("2026-11-06T12:00:00.000Z"),
+    });
   });
 
   it("rejects invalid photo signatures and oversized photo inputs", async () => {
@@ -361,7 +420,7 @@ describe("guest media upload API", () => {
     expect(mocks.state.assets).toHaveLength(0);
     expect(mocks.state.stored.size).toBe(0);
     expect(mocks.state.usage.usedBytes).toBe(0n);
-    expect(mocks.storage.deleteObject).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.deleteObject).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a guest session associated with a different event", async () => {
@@ -384,7 +443,7 @@ describe("guest media upload API", () => {
   });
 
   it("rejects exhausted photo quota and prevents concurrent quota oversubscription", async () => {
-    mocks.state.event.package!.photoLimit = 0;
+    mocks.state.event.freeTrial = { photoLimit: 0 };
     const exhausted = await post({
       kind: "photo",
       media: bytes(0xff, 0xd8, 0xff),
@@ -393,7 +452,7 @@ describe("guest media upload API", () => {
     expect(exhausted.status).toBe(413);
     expect(mocks.state.assets).toHaveLength(0);
 
-    mocks.state.event.package!.photoLimit = 10;
+    mocks.state.event.freeTrial = null;
     mocks.state.usage.quotaBytes = 100n;
     const first = makeRequest({
       kind: "photo",
@@ -418,59 +477,18 @@ describe("guest media upload API", () => {
     expect(mocks.state.stored.size).toBe(2);
   });
 
-  it("stores Live Moment as VIDEO and increments video storage usage", async () => {
+  it("rejects video uploads from the guest photo endpoint", async () => {
     const response = await post({
       kind: "video",
       media: testMp4(5),
       mimeType: "video/mp4",
     });
 
-    expect(response.status).toBe(201);
-    expect(mocks.state.assets[0]).toMatchObject({
-      type: "VIDEO",
-      moderationStatus: "PENDING",
-      duration: 5,
-      optimizedStorageKey: undefined,
-    });
-    expect(mocks.state.usage.videoBytes).toBe(BigInt(testMp4(5).length));
-    expect(mocks.state.usage.photoBytes).toBe(0n);
-  });
-
-  it("enforces the video count limit independently from the photo limit", async () => {
-    mocks.state.event.package!.videoLimit = 0;
-    mocks.state.event.package!.photoLimit = 10;
-
-    const response = await post({
-      kind: "video",
-      media: testMp4(5),
-      mimeType: "video/mp4",
-    });
-
-    expect(response.status).toBe(413);
+    expect(response.status).toBe(400);
     expect(mocks.state.assets).toHaveLength(0);
     expect(mocks.state.stored.size).toBe(0);
     expect(mocks.state.usage.photoBytes).toBe(0n);
     expect(mocks.state.usage.videoBytes).toBe(0n);
-  });
-
-  it("rejects video duration above the package limit and duration metadata it cannot verify", async () => {
-    const tooLong = await post({
-      kind: "video",
-      media: testMp4(11),
-      mimeType: "video/mp4",
-    });
-    const unknownDuration = await post({
-      kind: "video",
-      media: concat(
-        mp4Box("ftyp", concat(ascii("isom"), bytes(0, 0, 0, 0), ascii("isom"))),
-        mp4Box("mdat", bytes(1, 2, 3)),
-      ),
-      mimeType: "video/mp4",
-    });
-
-    expect(tooLong.status).toBe(400);
-    expect(unknownDuration.status).toBe(400);
-    expect(mocks.state.assets).toHaveLength(0);
   });
 
   it("does not accept uploads for draft, completed, archived, expired, or time-expired events", async () => {
@@ -529,7 +547,7 @@ describe("guest media upload API", () => {
     expect((await post(input)).status).toBe(201);
     expect((await post(input)).status).toBe(200);
     expect(mocks.state.assets).toHaveLength(1);
-    expect(mocks.storage.putObject).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.putObject).toHaveBeenCalledTimes(2);
   });
 
   it("applies the upload rate limit to the guest session", async () => {
@@ -548,5 +566,149 @@ describe("guest media upload API", () => {
     expect(responses[9].status).toBe(200);
     expect(responses[10].status).toBe(429);
     expect(responses[10].headers.get("retry-after")).toBeTruthy();
+  });
+
+  it("limits upload spam across newly-created guest sessions from one network", async () => {
+    mocks.state.event.package!.isUnlimited = true;
+    const responses = [];
+    for (let index = 0; index < 21; index += 1) {
+      responses.push(await post({
+        kind: "photo",
+        media: bytes(0xff, 0xd8, 0xff),
+        mimeType: "image/jpeg",
+        token: createGuestToken(),
+      }));
+    }
+
+    expect(responses.slice(0, 20).every((response) => response.status === 201)).toBe(true);
+    expect(responses[20].status).toBe(429);
+    expect(responses[20].headers.get("retry-after")).toBeTruthy();
+  });
+
+  it("enforces the 20-photo limit for completed uploads by guest session", async () => {
+    const token = createGuestToken();
+    const guestSessionId = "guest-session-limit-test";
+    const exhaustedAssets = Array.from({ length: 20 }, (_, index) => ({
+      eventId: "event-1",
+      guestSessionId,
+      type: "PHOTO",
+      uploadStatus: "COMPLETE",
+      idempotencyKey: `existing-${index}`,
+    }));
+    mocks.state.assets.push(...exhaustedAssets);
+    const response = await post({
+      kind: "photo",
+      media: bytes(0xff, 0xd8, 0xff),
+      mimeType: "image/jpeg",
+      token,
+      sessionId: guestSessionId,
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "Batas unggah 20 foto telah tercapai." });
+    expect(mocks.storage.putObject).not.toHaveBeenCalled();
+    expect(mocks.state.assets).toHaveLength(20);
+  });
+
+  it("does not count an incomplete upload against a guest's photo quota", async () => {
+    const token = createGuestToken();
+    const guestSessionId = "guest-session-incomplete-test";
+    mocks.state.assets.push(...Array.from({ length: 19 }, (_, index) => ({
+      eventId: "event-1",
+      guestSessionId,
+      type: "PHOTO",
+      uploadStatus: "COMPLETE",
+      idempotencyKey: `complete-${index}`,
+    })), {
+      eventId: "event-1",
+      guestSessionId,
+      type: "PHOTO",
+      uploadStatus: "PENDING",
+      idempotencyKey: "incomplete-photo",
+    });
+
+    const response = await post({
+      kind: "photo",
+      media: bytes(0xff, 0xd8, 0xff),
+      mimeType: "image/jpeg",
+      token,
+      sessionId: guestSessionId,
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      photoQuota: { uploaded: 20, limit: 20, remaining: 0 },
+    });
+  });
+
+  it("releases a guest's photo quota when a completed photo is deleted", async () => {
+    const token = createGuestToken();
+    const guestSessionId = "guest-session-reuse-test";
+    mocks.state.assets.push(...Array.from({ length: 20 }, (_, index) => ({
+      eventId: "event-1",
+      guestSessionId,
+      type: "PHOTO",
+      uploadStatus: "COMPLETE",
+      idempotencyKey: `reusable-${index}`,
+    })));
+    mocks.state.assets.splice(0, 1);
+    const response = await post({
+      kind: "photo",
+      media: bytes(0xff, 0xd8, 0xff),
+      mimeType: "image/jpeg",
+      token,
+      sessionId: guestSessionId,
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      photoQuota: { uploaded: 20, limit: 20, remaining: 0 },
+    });
+  });
+
+  it("blocks a new guest when all package guest slots are occupied", async () => {
+    mocks.state.event.package!.guestCapacity = 1;
+    mocks.state.assets.push({
+      eventId: "event-1",
+      guestSessionId: "another-guest-session",
+      type: "PHOTO",
+      uploadStatus: "COMPLETE",
+      idempotencyKey: "first-guest-photo",
+    });
+    const response = await post({
+      kind: "photo",
+      media: bytes(0xff, 0xd8, 0xff),
+      mimeType: "image/jpeg",
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "Kapasitas tamu acara sudah penuh. Tamu baru tidak dapat mengunggah foto.",
+    });
+    expect(mocks.state.assets).toHaveLength(1);
+    expect(mocks.storage.putObject).not.toHaveBeenCalled();
+  });
+
+  it("keeps the free trial's 10-photo limit event-wide", async () => {
+    mocks.state.event.freeTrial = { photoLimit: 10 };
+    mocks.state.assets.push(...Array.from({ length: 10 }, (_, index) => ({
+      eventId: "event-1",
+      guestSessionId: `trial-guest-${index}`,
+      type: "PHOTO",
+      uploadStatus: "COMPLETE",
+      idempotencyKey: `trial-photo-${index}`,
+    })));
+
+    const response = await post({
+      kind: "photo",
+      media: bytes(0xff, 0xd8, 0xff),
+      mimeType: "image/jpeg",
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({
+      error: "Acara ini sudah mencapai batas jumlah foto.",
+    });
+    expect(mocks.state.assets).toHaveLength(10);
   });
 });

@@ -14,6 +14,7 @@ export type EventAccessContext = {
 
 export type GuestEventAccessContext = {
   isPaid?: boolean;
+  isTrial?: boolean;
   privacyMode: EventPrivacy;
   status: EventStatus;
   expiresAt: Date | null;
@@ -99,7 +100,7 @@ export function canAcceptGuestContributions(
   now = new Date(),
 ): boolean {
   return (
-    event.isPaid === true &&
+    (event.isPaid === true || event.isTrial === true) &&
     getEffectiveGuestEventStatus(event, now) === "ONGOING" &&
     event.privacyMode !== "PRIVATE" &&
     (!event.expiresAt || event.expiresAt > now)
@@ -113,6 +114,9 @@ export function getEffectiveGuestEventStatus(
   if (event.status === "DRAFT" || event.status === "COMPLETED" ||
       event.status === "ARCHIVED" || event.status === "EXPIRED") {
     return event.status;
+  }
+  if (event.isTrial && event.status === "LIVE" && (!event.expiresAt || event.expiresAt > now)) {
+    return "ONGOING";
   }
   if (event.expiresAt && !Number.isFinite(event.expiresAt.getTime())) {
     return "SCHEDULE_UNAVAILABLE";
@@ -135,20 +139,20 @@ export function getEffectiveGuestEventStatus(
 }
 
 export function canAccessGuestEventPage(
-  event: Pick<GuestEventAccessContext, "privacyMode" | "status" | "isPaid">,
+  event: Pick<GuestEventAccessContext, "privacyMode" | "status" | "isPaid" | "isTrial">,
 ): boolean {
   return (
-    event.isPaid === true &&
+    (event.isPaid === true || event.isTrial === true) &&
     event.privacyMode !== "PRIVATE" &&
     ["UPCOMING", "LIVE", "COMPLETED", "EXPIRED"].includes(event.status)
   );
 }
 
 export function canViewEventGallery(
-  event: Pick<GuestEventAccessContext, "privacyMode" | "status" | "isPaid">,
+  event: Pick<GuestEventAccessContext, "privacyMode" | "status" | "isPaid" | "isTrial">,
 ): boolean {
   return (
-    event.isPaid === true &&
+    (event.isPaid === true || event.isTrial === true) &&
     (event.privacyMode === "PUBLIC_LINK" || event.privacyMode === "MODERATED") &&
     ["UPCOMING", "LIVE", "COMPLETED", "EXPIRED"].includes(event.status)
   );

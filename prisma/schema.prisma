@@ -78,6 +78,22 @@ enum ModerationStatus {
   FLAGGED
 }
 
+enum PhotoFilter {
+  ORIGINAL
+  DISPOSABLE_CAM
+  VINTAGE_FILM
+  RETRO
+  CLASSIC
+}
+
+enum PhotoFrame {
+  NO_FRAME
+  POLAROID_WHITE
+  POLAROID_VINTAGE
+  FILM_FRAME
+  MINIMAL_FRAME
+}
+
 enum OrderStatus {
   PENDING
   PAID
@@ -102,29 +118,62 @@ enum PartnerStatus {
   SUSPENDED
 }
 
+enum PartnerApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum EventAccessRole {
   OWNER
   MANAGER
   VIEWER
 }
 
+enum PromotionType {
+  FIRST_EVENT
+  REFERRAL_VOUCHER
+}
+
+enum ReferralStatus {
+  PENDING
+  REWARDED
+}
+
+enum ReferralVoucherStatus {
+  AVAILABLE
+  RESERVED
+  USED
+  EXPIRED
+}
+
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String   @id @default(cuid())
+  email        String   @unique
   passwordHash String?
   name         String?
-  role         UserRole  @default(ORGANIZER)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  referralCode String?  @unique
+  role         UserRole @default(ORGANIZER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  ownedEvents     Event[]             @relation("EventOwner")
-  orders          Order[]
-  partnerAccount  PartnerAccount?
-  partnerClients  PartnerClient[]
-  accessGrants    EventAccessGrant[]
-  memories        Memory[]            @relation("MemoryUploader")
-  mediaAssets     MediaAsset[]        @relation("MediaUploader")
-  moderationFlags ModerationFlag[]    @relation("FlagReporter")
+  ownedEvents                   Event[]                 @relation("EventOwner")
+  orders                        Order[]
+  partnerAccount                PartnerAccount?
+  partnerApplications           PartnerApplication[]    @relation("PartnerApplicant")
+  reviewedPartnerApplications   PartnerApplication[]    @relation("PartnerApplicationReviewer")
+  partnerDiscountTiers          PartnerDiscountTier[]   @relation("PartnerDiscountTierUpdater")
+  createdPartnerPriceAgreements PartnerPriceAgreement[] @relation("PartnerPriceAgreementCreator")
+  partnerClients                PartnerClient[]
+  accessGrants                  EventAccessGrant[]
+  memories                      Memory[]                @relation("MemoryUploader")
+  mediaAssets                   MediaAsset[]            @relation("MediaUploader")
+  moderationFlags               ModerationFlag[]        @relation("FlagReporter")
+  promotionSettingsUpdated      PromotionSettings[]
+  referralsSent                 Referral[]              @relation("ReferralReferrer")
+  referralReceived              Referral?               @relation("ReferralReferred")
+  referralVouchers              ReferralVoucher[]
+  freeTrial                     FreeTrial?
 }
 
 model GuestSession {
@@ -135,86 +184,103 @@ model GuestSession {
   expiresAt   DateTime
   createdAt   DateTime @default(now())
 
-  event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event    Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
   memories Memory[]
 
   @@index([eventId])
 }
 
 model Package {
-  id                    String   @id @default(cuid())
-  name                  String
-  price                 Decimal  @db.Decimal(12, 2)
-  currency              String   @default("IDR")
-  storageLimitBytes     BigInt
-  photoLimit            Int?
-  videoLimit            Int?
-  videoDurationLimit    Int?
-  eventDurationDays     Int
-  retentionDays         Int
-  customEventPage       Boolean  @default(false)
-  customQRCode          Boolean  @default(false)
-  filtersEnabled        Boolean  @default(false)
-  framesEnabled         Boolean  @default(false)
-  aiEnhancementEnabled  Boolean  @default(false)
-  aiCurationEnabled     Boolean  @default(false)
-  digitalAlbumEnabled   Boolean  @default(false)
-  liveMomentEnabled     Boolean  @default(false)
-  eventChallengesEnabled Boolean @default(false)
-  isActive              Boolean  @default(false)
-  metadata              Json?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                     String   @id @default(cuid())
+  name                   String
+  guestCapacity          Int?
+  isUnlimited            Boolean  @default(false)
+  price                  Decimal  @db.Decimal(12, 2)
+  currency               String   @default("IDR")
+  storageLimitBytes      BigInt
+  photoLimit             Int?
+  videoLimit             Int?
+  videoDurationLimit     Int?
+  eventDurationDays      Int
+  retentionDays          Int
+  customEventPage        Boolean  @default(false)
+  customQRCode           Boolean  @default(false)
+  filtersEnabled         Boolean  @default(false)
+  framesEnabled          Boolean  @default(false)
+  aiEnhancementEnabled   Boolean  @default(false)
+  aiCurationEnabled      Boolean  @default(false)
+  digitalAlbumEnabled    Boolean  @default(false)
+  liveMomentEnabled      Boolean  @default(false)
+  eventChallengesEnabled Boolean  @default(false)
+  isActive               Boolean  @default(false)
+  metadata               Json?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
-  events Event[]
-  orders Order[]
+  events              Event[]
+  orders              Order[]
+  partnerCustomPrices PartnerCustomPrice[]
 }
 
 model Event {
-  id            String        @id @default(cuid())
+  id            String       @id @default(cuid())
   ownerId       String
   packageId     String?
   name          String
-  slug          String        @unique
+  organizerName String?
+  slug          String       @unique
   description   String?
-  eventType     EventType     @default(WEDDING)
+  eventType     EventType    @default(WEDDING)
   eventDate     DateTime?
   startsAt      DateTime?
   endsAt        DateTime?
   timeZone      String?
   location      String?
   coverImageKey String?
-  status        EventStatus   @default(DRAFT)
-  privacyMode   EventPrivacy  @default(PUBLIC_LINK)
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  status        EventStatus  @default(DRAFT)
+  privacyMode   EventPrivacy @default(PUBLIC_LINK)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
   expiresAt     DateTime?
 
-  owner          User                 @relation("EventOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  package        Package?             @relation(fields: [packageId], references: [id], onDelete: SetNull)
-  customization  EventCustomization?
-  qrCode         QRCode?
-  storageUsage   StorageUsage?
-  guestSessions  GuestSession[]
-  memories       Memory[]
-  mediaAssets    MediaAsset[]
-  challenges     Challenge[]
-  albums         Album[]
-  orders         Order[]
-  accessGrants   EventAccessGrant[]
+  owner           User                @relation("EventOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  package         Package?            @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  customization   EventCustomization?
+  photoExperience PhotoExperience?
+  qrCode          QRCode?
+  storageUsage    StorageUsage?
+  guestSessions   GuestSession[]
+  memories        Memory[]
+  mediaAssets     MediaAsset[]
+  challenges      Challenge[]
+  albums          Album[]
+  orders          Order[]
+  accessGrants    EventAccessGrant[]
+  freeTrial       FreeTrial?
 
   @@index([ownerId])
   @@index([status])
 }
 
 model EventCustomization {
-  id          String   @id @default(cuid())
-  eventId     String   @unique
-  welcomeTitle String?
+  id             String   @id @default(cuid())
+  eventId        String   @unique
+  welcomeTitle   String?
   welcomeMessage String?
-  accentColor String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  accentColor    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+}
+
+model PhotoExperience {
+  id        String      @id @default(cuid())
+  eventId   String      @unique
+  filter    PhotoFilter @default(ORIGINAL)
+  frame     PhotoFrame  @default(NO_FRAME)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 }
@@ -245,17 +311,17 @@ model StorageUsage {
 }
 
 model Memory {
-  id              String   @id @default(cuid())
-  eventId         String
-  uploaderId      String?
-  guestSessionId  String?
-  caption         String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String   @id @default(cuid())
+  eventId        String
+  uploaderId     String?
+  guestSessionId String?
+  caption        String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  uploader      User?          @relation("MemoryUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
-  guestSession  GuestSession?  @relation(fields: [guestSessionId], references: [id], onDelete: SetNull)
+  event         Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  uploader      User?                 @relation("MemoryUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
+  guestSession  GuestSession?         @relation(fields: [guestSessionId], references: [id], onDelete: SetNull)
   mediaAssets   MediaAsset[]
   albumItems    AlbumItem[]
   challengeSubs ChallengeSubmission[]
@@ -265,37 +331,37 @@ model Memory {
 }
 
 model MediaAsset {
-  id                    String            @id @default(cuid())
-  eventId               String
-  memoryId              String?
-  uploaderId            String?
-  idempotencyKey        String?
-  type                  MediaType
-  originalStorageKey    String
-  optimizedStorageKey   String?
-  thumbnailStorageKey   String?
-  mimeType              String
-  fileSize              BigInt
-  width                 Int?
-  height                Int?
-  duration              Float?
-  uploadStatus          UploadStatus      @default(PENDING)
-  processingStatus      ProcessingStatus  @default(PENDING)
-  aiStatus              AiStatus          @default(NONE)
-  moderationStatus      ModerationStatus  @default(PENDING)
-  caption               String?
-  createdAt             DateTime          @default(now())
-  expiresAt             DateTime?
+  id                  String           @id @default(cuid())
+  eventId             String
+  memoryId            String?
+  uploaderId          String?
+  idempotencyKey      String?
+  type                MediaType
+  originalStorageKey  String
+  optimizedStorageKey String?
+  thumbnailStorageKey String?
+  mimeType            String
+  fileSize            BigInt
+  width               Int?
+  height              Int?
+  duration            Float?
+  uploadStatus        UploadStatus     @default(PENDING)
+  processingStatus    ProcessingStatus @default(PENDING)
+  aiStatus            AiStatus         @default(NONE)
+  moderationStatus    ModerationStatus @default(APPROVED)
+  caption             String?
+  createdAt           DateTime         @default(now())
+  expiresAt           DateTime?
 
-  event      Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  memory     Memory?         @relation(fields: [memoryId], references: [id], onDelete: SetNull)
-  uploader   User?           @relation("MediaUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
-  aiJobs     AIMediaJob[]
-  flags      ModerationFlag[]
+  event    Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  memory   Memory?          @relation(fields: [memoryId], references: [id], onDelete: SetNull)
+  uploader User?            @relation("MediaUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
+  aiJobs   AIMediaJob[]
+  flags    ModerationFlag[]
 
+  @@unique([eventId, idempotencyKey])
   @@index([eventId])
   @@index([memoryId])
-  @@unique([eventId, idempotencyKey])
 }
 
 model Challenge {
@@ -307,7 +373,7 @@ model Challenge {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  event       Event                  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event       Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
   submissions ChallengeSubmission[]
 
   @@index([eventId])
@@ -352,14 +418,14 @@ model AlbumItem {
 }
 
 model AIMediaJob {
-  id           String    @id @default(cuid())
+  id           String   @id @default(cuid())
   mediaAssetId String
   jobType      String
   provider     String?
-  status       AiStatus  @default(QUEUED)
+  status       AiStatus @default(QUEUED)
   payload      Json?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   mediaAsset MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
 
@@ -382,39 +448,51 @@ model ModerationFlag {
 }
 
 model Order {
-  id              String      @id @default(cuid())
-  orderNumber     String      @unique
-  idempotencyKey  String      @unique
-  userId          String
-  packageId       String
-  eventId         String?     @unique
-  packageSnapshot Json
-  status          OrderStatus @default(PENDING)
-  amount          Decimal     @db.Decimal(12, 2)
-  currency        String
-  expiresAt       DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  id               String         @id @default(cuid())
+  orderNumber      String         @unique
+  idempotencyKey   String         @unique
+  userId           String
+  packageId        String
+  eventId          String?        @unique
+  packageSnapshot  Json
+  status           OrderStatus    @default(PENDING)
+  amount           Decimal        @db.Decimal(12, 2)
+  currency         String
+  expiresAt        DateTime?
+  clientName       String?
+  priceSnapshot    Json?
+  baseAmount       Decimal?       @db.Decimal(12, 2)
+  discountAmount   Decimal        @default(0) @db.Decimal(12, 2)
+  promotionType    PromotionType?
+  partnerAccountId String?
+  tierCountedAt    DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
-  user     User      @relation(fields: [userId], references: [id], onDelete: Restrict)
-  package  Package   @relation(fields: [packageId], references: [id], onDelete: Restrict)
-  event    Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  payments Payment[]
+  user            User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  package         Package          @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  event           Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  partnerAccount  PartnerAccount?  @relation(fields: [partnerAccountId], references: [id], onDelete: SetNull)
+  payments        Payment[]
+  referralVoucher ReferralVoucher? @relation("ReferralVoucherOrder")
+  referralReward  Referral?        @relation("ReferralRewardOrder")
 
   @@index([userId, createdAt])
+  @@index([partnerAccountId, status])
+  @@index([promotionType, status])
 }
 
 model Payment {
-  id                 String        @id @default(cuid())
-  orderId            String
-  provider           String
-  providerRef        String?       @unique
-  checkoutUrl        String?
+  id                  String        @id @default(cuid())
+  orderId             String
+  provider            String
+  providerRef         String?       @unique
+  checkoutUrl         String?
   checkoutRequestedAt DateTime?
-  status             PaymentStatus @default(PENDING)
-  amount             Decimal       @db.Decimal(12, 2)
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  status              PaymentStatus @default(PENDING)
+  amount              Decimal       @db.Decimal(12, 2)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
@@ -422,15 +500,52 @@ model Payment {
 }
 
 model PartnerAccount {
-  id           String         @id @default(cuid())
-  userId       String         @unique
-  businessName String
-  status       PartnerStatus  @default(PENDING)
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  id             String        @id @default(cuid())
+  userId         String        @unique
+  businessName   String
+  status         PartnerStatus @default(PENDING)
+  paidOrderCount Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
-  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  clients PartnerClient[]
+  user            User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders          Order[]
+  clients         PartnerClient[]
+  applications    PartnerApplication[]
+  priceAgreements PartnerPriceAgreement[]
+}
+
+model PartnerApplication {
+  id                  String                   @id @default(cuid())
+  userId              String
+  partnerAccountId    String?
+  businessName        String
+  businessType        String
+  businessDescription String
+  businessAddress     String
+  city                String
+  province            String
+  website             String?
+  contactName         String
+  contactPhone        String
+  position            String
+  eventsPerMonth      Int
+  typicalEventTypes   String
+  reason              String
+  status              PartnerApplicationStatus @default(PENDING)
+  adminNote           String?
+  canReapply          Boolean                  @default(false)
+  reviewedById        String?
+  reviewedAt          DateTime?
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+
+  applicant      User            @relation("PartnerApplicant", fields: [userId], references: [id], onDelete: Cascade)
+  partnerAccount PartnerAccount? @relation(fields: [partnerAccountId], references: [id], onDelete: SetNull)
+  reviewer       User?           @relation("PartnerApplicationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
 }
 
 model PartnerClient {
@@ -445,6 +560,50 @@ model PartnerClient {
   @@index([partnerAccountId])
 }
 
+model PartnerDiscountTier {
+  id              String   @id @default(cuid())
+  minPaidOrders   Int
+  discountPercent Int
+  active          Boolean  @default(true)
+  updatedById     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  updatedBy User? @relation("PartnerDiscountTierUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@unique([minPaidOrders])
+  @@index([active, minPaidOrders])
+}
+
+model PartnerPriceAgreement {
+  id               String    @id @default(cuid())
+  partnerAccountId String
+  startsAt         DateTime
+  endsAt           DateTime?
+  active           Boolean   @default(true)
+  notes            String?
+  createdById      String?
+  createdAt        DateTime  @default(now())
+
+  partnerAccount PartnerAccount       @relation(fields: [partnerAccountId], references: [id], onDelete: Cascade)
+  createdBy      User?                @relation("PartnerPriceAgreementCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  prices         PartnerCustomPrice[]
+
+  @@index([partnerAccountId, active, startsAt, endsAt])
+}
+
+model PartnerCustomPrice {
+  id          String  @id @default(cuid())
+  agreementId String
+  packageId   String
+  price       Decimal @db.Decimal(12, 2)
+
+  agreement PartnerPriceAgreement @relation(fields: [agreementId], references: [id], onDelete: Cascade)
+  package   Package               @relation(fields: [packageId], references: [id], onDelete: Restrict)
+
+  @@unique([agreementId, packageId])
+}
+
 model EventAccessGrant {
   id        String          @id @default(cuid())
   eventId   String
@@ -457,4 +616,66 @@ model EventAccessGrant {
 
   @@unique([eventId, userId])
   @@index([userId])
+}
+
+model PromotionSettings {
+  id               String   @id @default("global")
+  firstEventActive Boolean  @default(true)
+  referralActive   Boolean  @default(true)
+  updatedAt        DateTime @updatedAt
+  updatedById      String?
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+model Referral {
+  id             String         @id @default(cuid())
+  referralCode   String
+  referrerId     String
+  referredUserId String         @unique
+  status         ReferralStatus @default(PENDING)
+  rewardOrderId  String?        @unique
+  createdAt      DateTime       @default(now())
+  rewardedAt     DateTime?
+
+  referrer    User             @relation("ReferralReferrer", fields: [referrerId], references: [id], onDelete: Restrict)
+  referred    User             @relation("ReferralReferred", fields: [referredUserId], references: [id], onDelete: Restrict)
+  rewardOrder Order?           @relation("ReferralRewardOrder", fields: [rewardOrderId], references: [id], onDelete: SetNull)
+  voucher     ReferralVoucher?
+
+  @@index([referrerId, createdAt])
+  @@index([status, createdAt])
+}
+
+model ReferralVoucher {
+  id         String                @id @default(cuid())
+  ownerId    String
+  referralId String                @unique
+  orderId    String?               @unique
+  amount     Decimal               @db.Decimal(12, 2)
+  status     ReferralVoucherStatus @default(AVAILABLE)
+  expiresAt  DateTime
+  createdAt  DateTime              @default(now())
+  usedAt     DateTime?
+
+  owner    User     @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  referral Referral @relation(fields: [referralId], references: [id], onDelete: Restrict)
+  order    Order?   @relation("ReferralVoucherOrder", fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([ownerId, status, expiresAt])
+  @@index([createdAt])
+}
+
+model FreeTrial {
+  id         String    @id @default(cuid())
+  userId     String    @unique
+  eventId    String    @unique
+  photoLimit Int       @default(10)
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime?
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
 }

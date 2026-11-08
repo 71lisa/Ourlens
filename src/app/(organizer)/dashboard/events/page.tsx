@@ -8,18 +8,7 @@ import { prisma } from "@/server/db/prisma";
 import { redirect } from "next/navigation";
 import { getEffectiveGuestEventStatus } from "@/server/authorization/policies";
 import { isValidTimeZone } from "@/lib/event-schedule";
-
-const eventTypeLabels: Record<string, string> = {
-  WEDDING: "Wedding",
-  BIRTHDAY: "Birthday",
-  GRADUATION: "Graduation",
-  REUNION: "Reunion",
-  CORPORATE: "Corporate",
-  PARTY: "Party",
-  SCHOOL: "School",
-  FAMILY: "Family",
-  OTHER: "Other",
-};
+import { getEventStatusLabel, getEventTypeLabel } from "@/lib/event-type";
 
 function storageLabel(bytes: bigint) {
   return `${(Number(bytes) / 1024 ** 3).toFixed(1)} GB`;
@@ -43,9 +32,9 @@ export default async function EventsPage() {
   return (
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <PageHeader title="Your events" description="Every celebration, gathered in one place." />
+        <PageHeader title="Acara Anda" description="Setiap perayaan, terkumpul dalam satu tempat." />
         <Link href="/dashboard/events/create" className={cn(buttonVariants())}>
-          Create event
+          Buat acara
         </Link>
       </div>
       {events.length ? (
@@ -56,34 +45,34 @@ export default async function EventsPage() {
                 className="aspect-[4/3] bg-cream-deep bg-cover bg-center"
                 style={event.coverImageKey ? { backgroundImage: `url("${event.coverImageKey.replaceAll('"', '%22')}")` } : undefined}
                 role="img"
-                aria-label={event.coverImageKey ? `Cover for ${event.name}` : "No event cover image"}
+                aria-label={event.coverImageKey ? `Sampul acara ${event.name}` : "Belum ada foto sampul acara"}
               />
               <div className="min-w-0">
-                <p className="text-xs uppercase tracking-[0.18em] text-burgundy">{eventTypeLabels[event.eventType] ?? event.eventType}</p>
+                <p className="text-xs uppercase tracking-[0.18em] text-burgundy">{getEventTypeLabel(event.eventType)}</p>
                 <h2 className="mt-1 truncate font-display text-2xl">{event.name}</h2>
                 <p className="mt-1 text-sm text-charcoal/65">
                   {event.startsAt && event.timeZone && isValidTimeZone(event.timeZone)
-                    ? new Intl.DateTimeFormat("en", {
+                    ? new Intl.DateTimeFormat("id-ID", {
                         dateStyle: "long",
                         timeStyle: "short",
                         timeZone: event.timeZone,
                       }).format(event.startsAt)
-                    : "Schedule unavailable"}
-                  <span className="mx-2 text-charcoal/30">·</span>{getEffectiveGuestEventStatus(event)}
+                    : "Jadwal tidak tersedia"}
+                  <span className="mx-2 text-charcoal/30">·</span>{getEventStatusLabel(getEffectiveGuestEventStatus(event))}
                 </p>
                 <p className="mt-2 text-xs text-charcoal/60">
-                  {event._count.memories} memories
-                  {event.storageUsage ? ` · ${storageLabel(event.storageUsage.usedBytes)} of ${storageLabel(event.storageUsage.quotaBytes)} used` : " · Storage not initialized"}
+                  {event._count.memories} kenangan
+                  {event.storageUsage ? ` · ${storageLabel(event.storageUsage.usedBytes)} dari ${storageLabel(event.storageUsage.quotaBytes)} terpakai` : " · Penyimpanan belum diinisialisasi"}
                 </p>
               </div>
               <Link href={`/dashboard/events/${event.id}`} className={cn(buttonVariants({ variant: "outline" }))}>
-                Open event
+                Buka acara
               </Link>
             </article>
           ))}
         </div>
       ) : (
-        <EmptyState title="Your first event starts here" description="Create an event to get its own guest link and QR code." />
+        <EmptyState title="Acara pertama Anda dimulai di sini" description="Buat acara untuk mendapatkan tautan tamu dan kode QR sendiri." />
       )}
     </div>
   );

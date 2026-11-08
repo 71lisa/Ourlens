@@ -24,14 +24,14 @@ export const metadata: Metadata = {
   },
   description: siteConfig.description,
   icons: {
-    icon: "/brand/favicon.svg",
+    icon: [{ url: "/brand/favicon.png?v=3", type: "image/png" }],
   },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
-      lang="en"
+      lang="id"
       className={`${sourceSans.variable} ${cormorant.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-cream font-sans text-charcoal">

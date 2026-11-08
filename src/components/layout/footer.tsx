@@ -10,23 +10,22 @@ export function Footer() {
           <BrandLogo />
           <p className="text-sm text-charcoal/70">{siteConfig.tagline}</p>
           <p className="text-sm text-charcoal/60">
-            Professional photographers capture the official story. OurLens captures everyone&apos;s
-            story.
+            Fotografer profesional menangkap cerita resmi. OurLens menangkap cerita semua orang.
           </p>
         </div>
-        <nav aria-label="Footer" className="grid grid-cols-2 gap-x-10 gap-y-2 text-sm">
+        <nav aria-label="Navigasi kaki halaman" className="grid grid-cols-2 gap-x-10 gap-y-2 text-sm">
           {navLinks.map((link) => (
             <Link key={link.href} href={link.href} className="text-charcoal/75 hover:text-burgundy">
               {link.label}
             </Link>
           ))}
           <Link href="/login" className="text-charcoal/75 hover:text-burgundy">
-            Organizer login
+            Masuk sebagai penyelenggara
           </Link>
         </nav>
       </div>
       <div className="border-t border-charcoal/10 py-4 text-center text-xs text-charcoal/50">
-        © {new Date().getFullYear()} OurLens. Collective memory for live events.
+        © {new Date().getFullYear()} OurLens. Kenangan kolektif untuk acara langsung.
       </div>
     </footer>
   );

@@ -3,6 +3,8 @@ import type { PhotoFilterId, PhotoFrameId } from "@/features/memories/media-stud
 export type ImageEditOptions = {
   filter: PhotoFilterId;
   frame: PhotoFrameId;
+  eventName: string;
+  eventDate: string;
   enhanced: boolean;
 };
 

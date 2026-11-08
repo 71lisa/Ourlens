@@ -3,21 +3,28 @@ import { Container, PageHeader } from "@/components/layout/page-header";
 import { Card } from "@/components/ui/card";
 import { LoginForm } from "@/features/auth/login-form";
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ callbackUrl?: string | string[] }>;
+}) {
+  const params = await searchParams;
+  const callbackUrl = typeof params.callbackUrl === "string" ? params.callbackUrl : "/";
+
   return (
     <Container className="flex max-w-lg flex-col py-16">
       <PageHeader
-        eyebrow="Organizers"
-        title="Welcome back."
-        description="Log in to manage your events. Guests never need an account to contribute."
+        eyebrow="OurLens"
+        title="Selamat datang kembali."
+        description="Masuk ke akun OurLens untuk melanjutkan ke ruang kerja Anda. Tamu tidak perlu akun untuk berkontribusi."
       />
       <Card className="mt-10">
-        <LoginForm />
+        <LoginForm callbackUrl={callbackUrl} />
       </Card>
       <p className="mt-4 text-sm text-charcoal/70">
-        New here?{" "}
+        Baru di sini?{" "}
         <Link href="/register" className="text-burgundy underline-offset-4 hover:underline">
-          Create an account
+          Buat akun
         </Link>
       </p>
     </Container>

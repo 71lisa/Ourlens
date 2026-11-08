@@ -4,30 +4,22 @@ import { createElement, type AnchorHTMLAttributes, type ImgHTMLAttributes } from
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GuestCapture } from "@/features/memories/guest-capture";
+import { GuestGallery } from "@/features/memories/guest-gallery";
 import GuestEventPage from "@/app/e/[slug]/page";
 import GuestGalleryPage from "@/app/e/[slug]/gallery/page";
 
-const { renderPhoto, findUnique } = vi.hoisted(() => ({
+const { renderPhoto, findUnique, countMedia, refreshRouter } = vi.hoisted(() => ({
   renderPhoto: vi.fn(),
   findUnique: vi.fn(),
+  countMedia: vi.fn(),
+  refreshRouter: vi.fn(),
 }));
 
-class TestFormData {
-  private readonly values = new Map<string, string | Blob>();
-
-  set(name: string, value: string | Blob) {
-    this.values.set(name, value);
-  }
-
-  get(name: string) {
-    return this.values.get(name) ?? null;
-  }
-}
-
 vi.mock("next/image", () => ({
-  default: (props: ImgHTMLAttributes<HTMLImageElement> & { unoptimized?: boolean }) => {
+  default: (props: ImgHTMLAttributes<HTMLImageElement> & { unoptimized?: boolean; fill?: boolean }) => {
     const imageProps = { ...props };
     delete imageProps.unoptimized;
+    delete imageProps.fill;
     return createElement("img", imageProps);
   },
 }));
@@ -37,12 +29,35 @@ vi.mock("next/link", () => ({
     createElement("a", props, props.children),
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: refreshRouter }),
+}));
+
 vi.mock("@/services/media/image-processing/local-canvas", () => ({
   getLocalImageProcessingService: () => ({ renderPhoto }),
 }));
 
+vi.mock("@/features/memories/normalize-guest-photo", () => ({
+  MAX_SOURCE_PHOTO_BYTES: 32 * 1024 * 1024,
+  normalizeGuestPhoto: vi.fn(async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      throw new Error("Berkas ini bukan foto yang didukung. Pilih gambar JPG, PNG, atau WebP.");
+    }
+    if (file.type === "image/heic" || file.type === "image/heif") {
+      return new File(["normalized"], `${file.name.replace(/\.[^.]*$/, "")}.jpg`, {
+        type: "image/jpeg",
+      });
+    }
+    return file;
+  }),
+}));
+
 vi.mock("@/server/db/prisma", () => ({
-  prisma: { event: { findUnique } },
+  prisma: { event: { findUnique }, mediaAsset: { count: countMedia } },
+}));
+
+vi.mock("@/auth", () => ({
+  auth: vi.fn(async () => null),
 }));
 
 vi.mock("@/server/authorization/policies", () => ({
@@ -53,9 +68,23 @@ vi.mock("@/server/authorization/policies", () => ({
   PUBLIC_GALLERY_MODERATION_STATUSES: ["APPROVED"],
 }));
 
+type MockPhotoQuota = {
+  scope: "guest" | "event";
+  uploaded: number;
+  limit: number;
+  remaining: number;
+  participantCount: number | null;
+  participantLimit: number | null;
+  canUpload: boolean;
+};
+
 type MockResponse = {
   ok: boolean;
-  json: () => Promise<{ error?: string }>;
+  json: () => Promise<{
+    error?: string;
+    nameRequired?: boolean;
+    photoQuota?: MockPhotoQuota;
+  }>;
 };
 
 type FetchCall = { url: string; init?: RequestInit };
@@ -63,16 +92,34 @@ type FetchCall = { url: string; init?: RequestInit };
 function mockGuestApi(uploadResponse?: Promise<MockResponse>) {
   const calls: FetchCall[] = [];
   let resolveSession!: (response: MockResponse) => void;
+  let sessionRequestCount = 0;
   const sessionResponse = new Promise<MockResponse>((resolve) => {
     resolveSession = resolve;
   });
-  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    if (url.endsWith("/guest-session")) return sessionResponse;
-    return uploadResponse ?? Promise.resolve({ ok: true, json: async () => ({}) });
-  });
-  vi.stubGlobal("fetch", fetchMock);
+    if (url.endsWith("/guest-session")) {
+      sessionRequestCount += 1;
+      return sessionRequestCount === 1
+        ? sessionResponse
+        : Promise.resolve(successfulResponse());
+    }
+    return uploadResponse ?? Promise.resolve({
+      ok: true,
+      json: async () => ({
+        photoQuota: {
+          scope: "guest" as const,
+          uploaded: 1,
+          limit: 20,
+          remaining: 19,
+          participantCount: 1,
+          participantLimit: 5,
+          canUpload: true,
+        },
+      }),
+    });
+  }));
   return { calls, resolveSession };
 }
 
@@ -82,7 +129,7 @@ function fileInput(label: string) {
   return input;
 }
 
-function photoFile(name: string, type: string) {
+function photoFile(name = "memory.jpg", type = "image/jpeg") {
   const signature = type === "image/png"
     ? [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
     : type === "image/webp"
@@ -91,359 +138,375 @@ function photoFile(name: string, type: string) {
   return new File([new Uint8Array(signature)], name, { type });
 }
 
-async function choosePhoto(file: File) {
-  fireEvent.change(fileInput("Choose a photo from gallery"), { target: { files: [file] } });
-  await waitFor(() => {
-    if (!screen.queryByRole("region", { name: "Media Studio" }) && !screen.queryByRole("alert")) {
-      throw new Error("Photo selection is still being prepared.");
-    }
-  });
-}
+const guestProps = {
+  slug: "sample-event",
+  eventName: "Audrey's Party",
+  eventDateLabel: "06 November 2026",
+  filter: "DISPOSABLE_CAM" as const,
+  frame: "POLAROID_WHITE" as const,
+  galleryAvailable: true,
+};
 
-function chooseVideo(file: File) {
-  fireEvent.change(fileInput("Choose a video from gallery"), { target: { files: [file] } });
-}
-
-const successfulResponse = (): MockResponse => ({ ok: true, json: async () => ({}) });
+const successfulResponse = (photoQuota: MockPhotoQuota = {
+  scope: "guest" as const,
+  uploaded: 0,
+  limit: 20,
+  remaining: 20,
+  participantCount: 0,
+  participantLimit: 5,
+  canUpload: true,
+}): MockResponse => ({ ok: true, json: async () => ({ ready: true, photoQuota }) });
 
 async function waitForSessionReady() {
-  await waitFor(() => expect(screen.queryByText("Getting your guest space ready…")).toBeNull());
+  await waitFor(() => expect(screen.queryByText("Menyiapkan ruang tamu…")).toBeNull());
+}
+
+async function choosePhoto(file: File) {
+  fireEvent.change(fileInput("Pilih foto dari galeri"), { target: { files: [file] } });
+  await waitFor(() => expect(screen.getByAltText(/Pratinjau foto dengan filter .* dan bingkai/)).toBeTruthy());
 }
 
 let originalCreateObjectURL: PropertyDescriptor | undefined;
 let originalRevokeObjectURL: PropertyDescriptor | undefined;
-let nextObjectUrl = 0;
 
 beforeEach(() => {
-  vi.stubGlobal("FormData", TestFormData);
   renderPhoto.mockReset();
   findUnique.mockReset();
-  renderPhoto.mockResolvedValue({
-    type: "image/jpeg",
-    size: 4,
-    arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff, 0x01]).buffer,
-  } as Blob);
+  countMedia.mockReset();
+  countMedia.mockResolvedValue(0);
+  renderPhoto.mockResolvedValue(new Blob(["processed"], { type: "image/jpeg" }));
   originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
   originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
-  nextObjectUrl = 0;
   Object.defineProperty(URL, "createObjectURL", {
     configurable: true,
-    value: vi.fn(() => `blob:ourlens-test-${++nextObjectUrl}`),
+    value: vi.fn(() => "blob:ourlens-test"),
   });
   Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
 });
 
 afterEach(() => {
   cleanup();
-  if (originalCreateObjectURL) {
-    Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
-  } else {
-    Reflect.deleteProperty(URL, "createObjectURL");
-  }
-  if (originalRevokeObjectURL) {
-    Object.defineProperty(URL, "revokeObjectURL", originalRevokeObjectURL);
-  } else {
-    Reflect.deleteProperty(URL, "revokeObjectURL");
-  }
+  if (originalCreateObjectURL) Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+  else Reflect.deleteProperty(URL, "createObjectURL");
+  if (originalRevokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", originalRevokeObjectURL);
+  else Reflect.deleteProperty(URL, "revokeObjectURL");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-describe("guest capture file selection", () => {
-  it("opens directly on the Photo and Live Moment choices", () => {
-    mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-
-    expect(screen.getByRole("heading", { name: "Choose a memory type" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Photo" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Live Moment" })).toBeTruthy();
-  });
-
-  it("opens the dedicated photo and video pickers synchronously from their buttons", () => {
-    mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-
-    const photoCamera = fileInput("Choose a photo from camera");
-    const photoGallery = fileInput("Choose a photo from gallery");
-    const photoCameraClick = vi.fn();
-    const photoGalleryClick = vi.fn();
-    photoCamera.addEventListener("click", photoCameraClick);
-    photoGallery.addEventListener("click", photoGalleryClick);
-
-    for (const input of [photoCamera, photoGallery]) {
-      expect(input.isConnected && !input.disabled).toBe(true);
-      expect(input.style.opacity).toBe("0");
-      expect(getComputedStyle(input).opacity).toBe("0");
-      expect(input.style.position).toBe("absolute");
-      expect(input.style.inset).toBe("0");
-      expect(input.style.width).toBe("100%");
-      expect(input.style.height).toBe("100%");
-      expect(input.style.zIndex).toBe("1");
-      expect(input.parentElement?.tagName).toBe("LABEL");
-    }
-    expect(photoCamera.parentElement).not.toBe(photoGallery.parentElement);
-    fireEvent.click(photoCamera);
-    expect(photoCameraClick).toHaveBeenCalledOnce();
-    expect(photoGalleryClick).not.toHaveBeenCalled();
-    fireEvent.click(photoGallery);
-    expect(photoGalleryClick).toHaveBeenCalledOnce();
-
-    fireEvent.click(screen.getByRole("button", { name: "Live Moment" }));
-    const videoCamera = fileInput("Choose a video from camera");
-    const videoGallery = fileInput("Choose a video from gallery");
-    const videoCameraClick = vi.fn();
-    const videoGalleryClick = vi.fn();
-    videoCamera.addEventListener("click", videoCameraClick);
-    videoGallery.addEventListener("click", videoGalleryClick);
-    for (const input of [videoCamera, videoGallery]) {
-      expect(input.isConnected && !input.disabled).toBe(true);
-      expect(input.style.opacity).toBe("0");
-      expect(getComputedStyle(input).opacity).toBe("0");
-      expect(input.style.position).toBe("absolute");
-      expect(input.style.inset).toBe("0");
-      expect(input.style.width).toBe("100%");
-      expect(input.style.height).toBe("100%");
-      expect(input.style.zIndex).toBe("1");
-      expect(input.parentElement?.tagName).toBe("LABEL");
-    }
-    expect(videoCamera.parentElement).not.toBe(videoGallery.parentElement);
-    fireEvent.click(videoCamera);
-    expect(videoCameraClick).toHaveBeenCalledOnce();
-    fireEvent.click(videoGallery);
-    expect(videoGalleryClick).toHaveBeenCalledOnce();
-
-    expect(videoGallery.accept).toContain(".mp4");
-    expect(videoCamera.getAttribute("capture")).toBe("environment");
-  });
-
-  it.each([
-    { format: "MP4", fileName: "moment.mp4", mimeType: "video/mp4" },
-    { format: "MOV", fileName: "moment.mov", mimeType: "video/quicktime" },
-  ])("previews a selected $format video and uploads it as VIDEO only after Share Memory", async ({ fileName, mimeType }) => {
+describe("guest photo upload", () => {
+  it("asks first-time guests for their name before enabling photo upload", async () => {
     const { calls, resolveSession } = mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    resolveSession(successfulResponse());
-    await waitForSessionReady();
-    fireEvent.click(screen.getByRole("button", { name: "Live Moment" }));
-    const video = new File(["video-data"], fileName, { type: mimeType });
-    chooseVideo(video);
+    render(<GuestCapture {...guestProps} />);
 
-    expect(URL.createObjectURL).toHaveBeenCalledWith(video);
-    expect(document.querySelector("video")?.getAttribute("src")).toBe("blob:ourlens-test-1");
-    expect((document.querySelector("video") as HTMLVideoElement).controls).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Use This Live Moment" }));
-    expect(calls.filter((call) => call.url.endsWith("/memories"))).toHaveLength(0);
-    expect(screen.getByText("Live Moment video")).toBeTruthy();
+    resolveSession({
+      ok: true,
+      json: async () => ({ ready: false, nameRequired: true }),
+    });
+    expect(await screen.findByLabelText("Masukkan nama sebelum berbagi foto")).toBeTruthy();
+    expect(screen.queryByLabelText("Pilih foto dari galeri")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Share Memory" }));
-    await waitFor(() => expect(calls.some((call) => call.url.endsWith("/memories"))).toBe(true));
-    const uploadCall = calls.find((call) => call.url.endsWith("/memories"));
-    const body = uploadCall?.init?.body as FormData;
-    expect(body.get("kind")).toBe("video");
-    expect(body.get("video")).toBeInstanceOf(File);
+    fireEvent.change(screen.getByLabelText("Masukkan nama sebelum berbagi foto"), {
+      target: { value: "Alya" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Lanjutkan" }));
+
+    await waitFor(() => expect(
+      (screen.getByLabelText("Pilih foto dari galeri") as HTMLInputElement).disabled,
+    ).toBe(false));
+    expect(calls.filter((call) => call.url.endsWith("/guest-session"))).toHaveLength(2);
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ displayName: "Alya" });
   });
 
-  it("previews a selected photo in Media Studio and retains it when session setup completes", async () => {
-    const { resolveSession } = mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    const photo = photoFile("memory.jpg", "image/jpeg");
+  it("uses a public guest session without presenting sign-in or style controls", async () => {
+    const { calls, resolveSession } = mockGuestApi();
+    render(<GuestCapture {...guestProps} />);
+
+    expect(screen.getByText("Tidak perlu membuat akun. Gaya foto acara akan diterapkan otomatis.")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /login|sign in/i })).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(fileInput("Pilih foto dari kamera").closest("label")?.className).toContain("bg-burgundy");
+    expect(fileInput("Pilih foto dari galeri").closest("label")?.className).toContain("border-burgundy");
+    expect(screen.getByLabelText("Pilih foto dari kamera")).toBeTruthy();
+    expect(screen.getByLabelText("Pilih foto dari galeri")).toBeTruthy();
+    expect((screen.getByLabelText("Pilih foto dari galeri") as HTMLInputElement).disabled).toBe(true);
+    expect(calls[0].url).toContain("/guest-session");
+    expect(calls[0].init).toMatchObject({ method: "POST", credentials: "same-origin" });
+
+    resolveSession(successfulResponse());
+    await waitForSessionReady();
+    expect((screen.getByLabelText("Pilih foto dari galeri") as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it("previews the event's fixed filter and frame and submits the original photo only", async () => {
+    const { calls, resolveSession } = mockGuestApi();
+    render(<GuestCapture {...guestProps} />);
+    resolveSession(successfulResponse());
+    await waitForSessionReady();
+
+    const photo = photoFile();
     await choosePhoto(photo);
-
-    expect(URL.createObjectURL).toHaveBeenCalledWith(photo);
-    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
-    expect(screen.getByText("Getting your guest space ready…")).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Media Studio" })).toBeTruthy();
-    expect(screen.getByAltText("Photo edit preview").getAttribute("src")).toBe("blob:ourlens-test-1");
-    expect(screen.queryByText(photo.name)).toBeNull();
-    resolveSession(successfulResponse());
-    await waitFor(() => expect(screen.getByRole("region", { name: "Media Studio" })).toBeTruthy());
-    expect(screen.getByAltText("Photo edit preview").getAttribute("src")).toBe("blob:ourlens-test-1");
-  });
-
-  it("uses a newly selected photo for the updated preview and Media Studio edits", async () => {
-    const { resolveSession } = mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    resolveSession(successfulResponse());
-    await waitForSessionReady();
-    const firstPhoto = photoFile("first.jpg", "image/jpeg");
-    await choosePhoto(firstPhoto);
-    expect(screen.getByAltText("Photo edit preview").getAttribute("src")).toBe("blob:ourlens-test-1");
-
-    fireEvent.click(screen.getByRole("button", { name: "Retake" }));
-    const secondPhoto = photoFile("second.png", "image/png");
-    await choosePhoto(secondPhoto);
-    expect(screen.getByAltText("Photo edit preview").getAttribute("src")).toBe("blob:ourlens-test-2");
-
-    fireEvent.click(screen.getByRole("button", { name: "Share Memory" }));
-    await waitFor(() => expect(renderPhoto).toHaveBeenCalledTimes(1));
-    expect(renderPhoto).toHaveBeenCalledWith(secondPhoto, {
-      filter: "original",
-      frame: "none",
+    expect(renderPhoto).toHaveBeenCalledWith(photo, {
+      filter: "DISPOSABLE_CAM",
+      frame: "POLAROID_WHITE",
+      eventName: "Audrey's Party",
+      eventDate: "06 November 2026",
       enhanced: false,
     });
-  });
 
-  it("recognizes a valid photo by its bytes when iOS omits or misreports MIME metadata", async () => {
-    const { resolveSession } = mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    resolveSession(successfulResponse());
-    await waitForSessionReady();
-    const photo = photoFile("IMG_6603.bin", "");
-    await choosePhoto(photo);
-
-    expect(screen.getByAltText("Photo edit preview").getAttribute("src")).toBe("blob:ourlens-test-1");
-    expect(URL.createObjectURL).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "IMG_6603.jpg", type: "image/jpeg" }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Share Memory" }));
-    await waitFor(() => expect(renderPhoto).toHaveBeenCalledTimes(1));
-    const mediaStudioFile = renderPhoto.mock.calls[0][0] as File;
-    expect(mediaStudioFile.name).toBe("IMG_6603.jpg");
-    expect(mediaStudioFile.type).toBe("image/jpeg");
-  });
-
-  it("allows photo selection while session loads but waits for session before upload", async () => {
-    const { calls } = mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    const photo = photoFile("memory.jpg", "image/jpeg");
-    await choosePhoto(photo);
-
-    const shareButton = screen.getByRole("button", { name: "Preparing guest session…" }) as HTMLButtonElement;
-    expect(shareButton.disabled).toBe(true);
-    fireEvent.click(shareButton);
-    expect(calls.some((call) => call.url.endsWith("/memories"))).toBe(false);
-  });
-
-  it("accepts selected files from the camera inputs for both media modes", async () => {
-    mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    const photo = photoFile("camera.jpg", "image/jpeg");
-    fireEvent.change(fileInput("Choose a photo from camera"), { target: { files: [photo] } });
-
-    await waitFor(() => expect(screen.getByRole("region", { name: "Media Studio" })).toBeTruthy());
-
-    fireEvent.click(screen.getByRole("button", { name: "Retake" }));
-    fireEvent.click(screen.getByRole("button", { name: "Live Moment" }));
-    const video = new File(["video-data"], "camera.mp4", { type: "video/mp4" });
-    fireEvent.change(fileInput("Choose a video from camera"), { target: { files: [video] } });
-
-    expect(document.querySelector("video")?.getAttribute("src")).toBe("blob:ourlens-test-2");
-  });
-
-  it("passes the selected photo through editing and uploads only on explicit confirmation", async () => {
-    const { calls, resolveSession } = mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    resolveSession(successfulResponse());
-    await waitForSessionReady();
-    const photo = photoFile("memory.jpg", "image/jpeg");
-    await choosePhoto(photo);
-    fireEvent.click(screen.getByRole("button", { name: "Warm" }));
-    fireEvent.click(screen.getByRole("tab", { name: "frame" }));
-    fireEvent.click(screen.getByRole("button", { name: "Polaroid" }));
-    fireEvent.click(screen.getByRole("tab", { name: "enhance" }));
-    fireEvent.click(screen.getByRole("button", { name: "Enhanced" }));
-    expect(screen.getByRole("button", { name: "Share Memory" })).toBeTruthy();
-    expect(renderPhoto).not.toHaveBeenCalled();
-    expect(calls.filter((call) => call.url.endsWith("/memories"))).toHaveLength(0);
-
-    fireEvent.change(screen.getByPlaceholderText("Best day ever…"), {
-      target: { value: "Our day" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Share Memory" }));
+    fireEvent.change(screen.getByLabelText(/Keterangan/), { target: { value: "Our day" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unggah Foto" }));
     await waitFor(() => expect(calls.some((call) => call.url.endsWith("/memories"))).toBe(true));
-    expect(renderPhoto).toHaveBeenCalledWith(photo, {
-      filter: "warm",
-      frame: "polaroid",
-      enhanced: true,
-    });
 
     const uploadCall = calls.find((call) => call.url.endsWith("/memories"));
     const body = uploadCall?.init?.body as FormData;
     expect(body.get("kind")).toBe("photo");
-    expect(body.get("photo")).toBeInstanceOf(File);
-    expect(body.get("original")).toBe(photo);
+    expect(body.get("photo")).toBe(photo);
+    expect(body.get("original")).toBeNull();
     expect(body.get("caption")).toBe("Our day");
+    expect(uploadCall?.init?.credentials).toBe("same-origin");
+    expect(screen.getByRole("heading", { name: "Foto kamu sudah masuk ke galeri." })).toBeTruthy();
+    expect(screen.getByText("Foto yang sudah diunggah: 1/20")).toBeTruthy();
+    expect(screen.getByText("Kamu masih bisa mengunggah 19 foto lagi.")).toBeTruthy();
   });
 
-  it("does not error or leave the selection screen when the picker is cancelled", () => {
-    mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    fireEvent.change(fileInput("Choose a photo from gallery"), { target: { files: [] } });
+  it("shows a clear exhausted quota and prevents another upload", async () => {
+    const { resolveSession } = mockGuestApi();
+    render(<GuestCapture {...guestProps} />);
+    resolveSession(successfulResponse({
+      scope: "guest",
+      uploaded: 20,
+      limit: 20,
+      remaining: 0,
+      participantCount: 1,
+      participantLimit: 5,
+      canUpload: false,
+    }));
+    await waitForSessionReady();
 
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByText("Choose from gallery")).toBeTruthy();
+    expect(screen.getByText("Foto yang sudah diunggah: 20/20")).toBeTruthy();
+    expect(screen.getByText("Batas unggah 20 foto telah tercapai.")).toBeTruthy();
+    expect((screen.getByLabelText("Pilih foto dari galeri") as HTMLInputElement).disabled).toBe(true);
   });
 
-  it("explains invalid files instead of silently rejecting them", async () => {
-    mockGuestApi();
-    render(<GuestCapture slug="sample-event" />);
-    await choosePhoto(new File(["not an image"], "notes.txt", { type: "text/plain" }));
+  it("explains when guest capacity is full", async () => {
+    const { resolveSession } = mockGuestApi();
+    render(<GuestCapture {...guestProps} />);
+    resolveSession(successfulResponse({
+      scope: "guest",
+      uploaded: 0,
+      limit: 20,
+      remaining: 20,
+      participantCount: 5,
+      participantLimit: 5,
+      canUpload: false,
+    }));
+    await waitForSessionReady();
 
-    expect(screen.getByRole("alert").textContent).toContain("This photo format isn’t supported.");
+    expect(screen.getByText("Kapasitas tamu acara sudah penuh. Tamu baru tidak dapat mengunggah foto.")).toBeTruthy();
+    expect((screen.getByLabelText("Pilih foto dari galeri") as HTMLInputElement).disabled).toBe(true);
   });
 
-  it("shows upload progress and keeps the selected photo available when upload fails", async () => {
-    let finishUpload!: (response: MockResponse) => void;
-    const uploadResponse = new Promise<MockResponse>((resolve) => {
-      finishUpload = resolve;
-    });
-    const { resolveSession } = mockGuestApi(uploadResponse);
-    render(<GuestCapture slug="sample-event" />);
+  it("shows free trial usage against the event-wide limit", async () => {
+    const { resolveSession } = mockGuestApi();
+    render(<GuestCapture {...guestProps} />);
+    resolveSession(successfulResponse({
+      scope: "event",
+      uploaded: 8,
+      limit: 10,
+      remaining: 2,
+      participantCount: null,
+      participantLimit: null,
+      canUpload: true,
+    }));
+    await waitForSessionReady();
+
+    expect(screen.getByText("Foto yang sudah diunggah: 8/10 · batas total uji coba gratis")).toBeTruthy();
+    expect(screen.getByText("Kamu masih bisa mengunggah 2 foto lagi.")).toBeTruthy();
+  });
+
+  it("does not allow video or invalid image formats through the guest picker", async () => {
+    const { resolveSession } = mockGuestApi();
+    render(<GuestCapture {...guestProps} />);
+    expect(document.querySelector('input[type="file"]')?.getAttribute("accept")).toBe("image/*");
+    expect(document.querySelector('input[accept*="video"]')).toBeNull();
+
     resolveSession(successfulResponse());
     await waitForSessionReady();
-    await choosePhoto(photoFile("memory.jpg", "image/jpeg"));
-    fireEvent.click(screen.getByRole("button", { name: "Share Memory" }));
+    fireEvent.change(fileInput("Pilih foto dari galeri"), {
+      target: { files: [new File(["not an image"], "notes.txt", { type: "text/plain" })] },
+    });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Berkas ini bukan foto yang didukung"));
+  });
 
-    await waitFor(() => expect(screen.getByRole("progressbar", { name: "Memory upload" })).toBeTruthy());
-    finishUpload({ ok: false, json: async () => ({ error: "Upload rejected." }) });
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Upload rejected."));
-    expect(screen.getByAltText("Photo edit preview")).toBeTruthy();
+  it("shows and uploads a selected photo when randomUUID is unavailable on an HTTP LAN origin", async () => {
+    const { calls, resolveSession } = mockGuestApi();
+    const randomUUID = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+    Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
+    try {
+      render(<GuestCapture {...guestProps} />);
+      resolveSession(successfulResponse());
+      await waitForSessionReady();
+
+      fireEvent.change(fileInput("Pilih foto dari galeri"), {
+        target: { files: [photoFile("phone-photo.jpg")] },
+      });
+
+      expect(await screen.findByAltText(/Pratinjau foto dengan filter .* dan bingkai/)).toBeTruthy();
+      const uploadButton = await screen.findByRole("button", { name: "Unggah Foto" });
+      expect((uploadButton as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByAltText(/Pratinjau foto dengan filter .* dan bingkai/).compareDocumentPosition(uploadButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      fireEvent.click(uploadButton);
+      await waitFor(() => expect(calls.some((call) => call.url.endsWith("/memories"))).toBe(true));
+
+      const uploadCall = calls.find((call) => call.url.endsWith("/memories"));
+      const body = uploadCall?.init?.body as FormData;
+      expect(body.get("photo")).toBeInstanceOf(File);
+      expect(body.get("idempotencyKey")).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(screen.getByRole("heading", { name: "Foto kamu sudah masuk ke galeri." })).toBeTruthy();
+    } finally {
+      if (randomUUID) Object.defineProperty(globalThis.crypto, "randomUUID", randomUUID);
+      else Reflect.deleteProperty(globalThis.crypto, "randomUUID");
+    }
+  });
+
+  it("keeps the original selected photo and explains failed uploads", async () => {
+    let finishUpload!: (response: MockResponse) => void;
+    const uploadResponse = new Promise<MockResponse>((resolve) => { finishUpload = resolve; });
+    const { resolveSession } = mockGuestApi(uploadResponse);
+    render(<GuestCapture {...guestProps} />);
+    resolveSession(successfulResponse());
+    await waitForSessionReady();
+    await choosePhoto(photoFile());
+    fireEvent.click(screen.getByRole("button", { name: "Unggah Foto" }));
+    await waitFor(() => expect(screen.getByRole("progressbar", { name: "Pengunggahan foto" })).toBeTruthy());
+    finishUpload({ ok: false, json: async () => ({ error: "Unggahan ditolak." }) });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Unggahan ditolak."));
+    expect(screen.getByAltText(/Pratinjau foto dengan filter .* dan bingkai/)).toBeTruthy();
   });
 });
 
-describe("guest capture entry points", () => {
-  it("uses the empty-gallery Add the first memory link as the direct capture entry", async () => {
+describe("guest photo entry points", () => {
+  it("offers a direct capture link from an empty public gallery", async () => {
     findUnique.mockResolvedValue({
       name: "Our event",
-      privacyMode: "PUBLIC",
+      eventDate: new Date("2026-11-09T00:00:00.000Z"),
+      eventType: "BIRTHDAY",
+      location: "Bangkok",
+      coverImageKey: "/cover.jpg",
+      privacyMode: "PUBLIC_LINK",
       status: "LIVE",
       expiresAt: null,
       startsAt: null,
-      endsAt: null,
+      endsAt: new Date("2026-11-09T00:00:00.000Z"),
       timeZone: "UTC",
-      orders: [{ id: "paid-order" }],
+      orders: [{ id: "paid-order", packageSnapshot: null }],
+      package: { name: "Paket 5", guestCapacity: 5, isUnlimited: false },
+      customization: null,
+      freeTrial: null,
+      _count: { guestSessions: 2 },
       mediaAssets: [],
     });
 
     render(await GuestGalleryPage({ params: Promise.resolve({ slug: "sample-event" }) }));
-
-    expect(screen.getByRole("link", { name: "Add the first memory" }).getAttribute("href"))
+    expect(screen.getByAltText("Sampul acara Our event")).toBeTruthy();
+    expect(screen.getByText("Ulang tahun · Bangkok")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Our event" })).toBeTruthy();
+    expect(screen.getByText("0")).toBeTruthy();
+    expect(screen.getByText("9 Nov")).toBeTruthy();
+    expect(screen.getByText("2/5")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Bagikan momen pertama" }).getAttribute("href"))
       .toBe("/e/sample-event#capture-options");
-    expect(screen.queryByRole("link", { name: "Capture a Memory" })).toBeNull();
   });
 
-  it("links the main Capture a Memory entry straight to the media choices", async () => {
+  it("opens photos with download and owner delete actions", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ success: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <GuestGallery
+        slug="sample-event"
+        eventName="Our event"
+        canDelete
+        initialAssets={[{
+          id: "photo-1",
+          type: "PHOTO",
+          caption: "A memory",
+          uploaderName: "Audrey",
+          createdAt: "2026-11-06T12:00:00.000Z",
+        }]}
+      />,
+    );
+
+    expect(screen.getByText("Diunggah oleh Audrey")).toBeTruthy();
+    expect(screen.getByText("A memory").className).toContain("truncate");
+    expect(screen.getByText("A memory").className).toContain("text-sm");
+    expect(screen.getByText("Diunggah oleh Audrey").className).toContain("text-[10px]");
+    expect(screen.getByText("Diunggah oleh Audrey").getAttribute("style")).toContain("text-size-adjust: none");
+    const gridClassName = screen.getByRole("button", { name: "Lihat foto: A memory" })
+      .closest("figure")?.parentElement?.className ?? "";
+    expect(gridClassName).toContain("grid-cols-2");
+    expect(gridClassName).toContain("sm:grid-cols-3");
+    expect(gridClassName).toContain("xl:grid-cols-5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Lihat foto: A memory" }));
+    expect(screen.getByRole("dialog", { name: "Momen 1 dari 1" })).toBeTruthy();
+    expect(screen.getAllByText("Diunggah oleh Audrey")).toHaveLength(2);
+    expect(screen.getAllByText("A memory")[1].className).toContain("text-base");
+    expect(screen.getAllByText("Diunggah oleh Audrey")[1].className).toContain("text-[10px]");
+    expect(screen.getAllByText("Diunggah oleh Audrey")[1].getAttribute("style"))
+      .toContain("text-size-adjust: none");
+    expect(screen.getByRole("link", { name: "Unduh" }).getAttribute("href"))
+      .toBe("/api/events/sample-event/media/photo-1?download=1");
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/events/sample-event/media/photo-1",
+      expect.objectContaining({ method: "DELETE" }),
+    ));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("passes the database photo experience into the public event page", async () => {
     findUnique.mockResolvedValue({
-      name: "Our event",
-      eventDate: null,
+      name: "Audrey's Party",
+      eventDate: new Date("2026-11-06T12:00:00.000Z"),
       description: null,
       location: null,
-      eventType: "WEDDING",
-      coverImageKey: null,
-      privacyMode: "PUBLIC",
+      eventType: "PARTY",
+      coverImageKey: "https://example.com/event-cover.jpg",
+      privacyMode: "PUBLIC_LINK",
       status: "LIVE",
       expiresAt: null,
       startsAt: new Date(Date.now() - 60_000),
       endsAt: new Date(Date.now() + 60_000),
       timeZone: "UTC",
       orders: [{ id: "paid-order" }],
+      mediaAssets: [],
+      _count: { guestSessions: 0 },
       challenges: [],
       customization: null,
+      photoExperience: { filter: "DISPOSABLE_CAM", frame: "POLAROID_WHITE" },
     });
 
     render(await GuestEventPage({ params: Promise.resolve({ slug: "sample-event" }) }));
-
-    expect(screen.getByRole("link", { name: "Capture a Memory" }).getAttribute("href"))
+    const eventHeading = screen.getByRole("heading", { name: "Audrey's Party" });
+    const captureHeading = screen.getByRole("heading", { name: "Abadikan momen di Audrey's Party." });
+    expect(eventHeading).toBeTruthy();
+    expect(eventHeading.compareDocumentPosition(captureHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByText("Momen yang terkumpul")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /Buat acaramu/i })).toBeNull();
+    expect(screen.getByRole("img", { name: "Sampul acara Audrey's Party" }).getAttribute("src"))
+      .toBe("https://example.com/event-cover.jpg");
+    expect(screen.getByRole("link", { name: "Bagikan Momen" }).getAttribute("href"))
       .toBe("#capture-options");
+    expect(screen.getByRole("link", { name: "Lihat Galeri" }).getAttribute("href"))
+      .toBe("/e/sample-event/gallery");
+    expect(screen.getByText("Kumpulan momen hari ini.")).toBeTruthy();
+    expect(screen.getByText("Setiap tamu punya cerita berbeda dari perayaan ini.")).toBeTruthy();
   });
 });

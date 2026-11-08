@@ -9,21 +9,16 @@ export async function GET(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const session = await auth();
-  if (!session?.user || !["ADMIN", "ORGANIZER"].includes(session.user.role)) {
-    return new Response("Unauthorized", { status: 401 });
+  if (!session?.user || !["ADMIN", "ORGANIZER", "PARTNER"].includes(session.user.role)) {
+    return new Response("Anda tidak memiliki izin.", { status: 401 });
   }
 
   const { slug } = await params;
   const event = await prisma.event.findFirst({
     where: session.user.role === "ADMIN" ? { slug } : { slug, ownerId: session.user.id },
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      qrCode: { select: { destinationUrl: true } },
-    },
+    select: { slug: true, qrCode: { select: { destinationUrl: true } } },
   });
-  if (!event) return new Response("Not found", { status: 404 });
+  if (!event) return new Response("Acara tidak ditemukan.", { status: 404 });
 
   const destinationUrl = event.qrCode?.destinationUrl ?? new URL(
     eventGuestPath(event.slug),

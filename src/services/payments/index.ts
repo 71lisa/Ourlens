@@ -1,7 +1,12 @@
+import { LocalMockPaymentService } from "./mock";
 import { MidtransPaymentService } from "./midtrans";
 
 export function getPaymentService() {
-  return new MidtransPaymentService();
+  const serverKey = process.env.MIDTRANS_SERVER_KEY?.trim();
+  if (serverKey) {
+    return new MidtransPaymentService();
+  }
+  return new LocalMockPaymentService();
 }
 
-export { MidtransPaymentService };
+export { LocalMockPaymentService, MidtransPaymentService };

@@ -2,6 +2,7 @@ import { OrderStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { publicEnv } from "@/lib/env";
 import { prisma } from "@/server/db/prisma";
 import { parsePackageSnapshot } from "@/server/packages/snapshot";
+import { shouldIssueReferralReward } from "@/server/promotions/referral";
 import { getPaymentService } from "@/services/payments";
 import {
   PaymentConfigurationError,
@@ -60,13 +61,22 @@ export async function createCheckoutForOrder(orderId: string, ownerId: string): 
   if (!order) throw new Error("Order was not found or does not belong to this organizer.");
   if (order.status !== "PENDING") throw new Error("Only pending orders can be paid.");
   if (order.expiresAt && order.expiresAt <= new Date()) {
-    await prisma.$transaction([
-      prisma.order.update({ where: { id: order.id }, data: { status: "EXPIRED" } }),
-      prisma.payment.updateMany({
+    const now = new Date();
+    await prisma.$transaction(async (transaction) => {
+      await transaction.order.update({ where: { id: order.id }, data: { status: "EXPIRED" } });
+      await transaction.payment.updateMany({
         where: { orderId: order.id, provider: "MIDTRANS", status: "PENDING" },
         data: { status: "EXPIRED" },
-      }),
-    ]);
+      });
+      await transaction.referralVoucher.updateMany({
+        where: { orderId: order.id, status: "RESERVED", expiresAt: { lte: now } },
+        data: { status: "EXPIRED", orderId: null },
+      });
+      await transaction.referralVoucher.updateMany({
+        where: { orderId: order.id, status: "RESERVED", expiresAt: { gt: now } },
+        data: { status: "AVAILABLE", orderId: null },
+      });
+    });
     throw new Error("This order has expired.");
   }
 
@@ -133,7 +143,12 @@ export async function createCheckoutForOrder(orderId: string, ownerId: string): 
       eventName: order.event?.name ?? snapshot.name,
       customerEmail: customer.email,
       customerName: customer.name,
-      finishUrl: new URL(`/dashboard/transactions/${order.id}?return=1`, publicEnv().NEXT_PUBLIC_APP_URL).toString(),
+      finishUrl: new URL(
+        order.partnerAccountId
+          ? `/partner/orders/${order.id}?return=1`
+          : `/dashboard/transactions/${order.id}?return=1`,
+        publicEnv().NEXT_PUBLIC_APP_URL,
+      ).toString(),
     });
     await prisma.payment.update({
       where: { id: payment.id },
@@ -157,7 +172,7 @@ export async function applyMidtransNotification(
       return await prisma.$transaction(async (transaction) => {
         const order = await transaction.order.findUnique({
           where: { orderNumber: notification.orderNumber },
-          include: { event: true },
+          include: { event: true, referralVoucher: true },
         });
         if (!order) throw new InvalidPaymentNotificationError("The payment order was not found.");
         if (!amountMatches(order.amount, notification.amount)) {
@@ -192,10 +207,106 @@ export async function applyMidtransNotification(
             providerRef: notification.transactionId,
           },
         });
+        const shouldCountPartnerOrder =
+          nextState.isPaid && Boolean(order.partnerAccountId) && !order.tierCountedAt;
         await transaction.order.update({
           where: { id: order.id },
-          data: { status: nextState.orderStatus },
+          data: {
+            status: nextState.orderStatus,
+            ...(shouldCountPartnerOrder ? { tierCountedAt: new Date() } : {}),
+          },
         });
+        if (shouldCountPartnerOrder && order.partnerAccountId) {
+          await transaction.partnerAccount.update({
+            where: { id: order.partnerAccountId },
+            data: { paidOrderCount: { increment: 1 } },
+          });
+        }
+
+        if (nextState.isPaid && order.referralVoucher?.status === "RESERVED") {
+          await transaction.referralVoucher.updateMany({
+            where: {
+              id: order.referralVoucher.id,
+              orderId: order.id,
+              status: "RESERVED",
+            },
+            data: { status: "USED", usedAt: new Date() },
+          });
+        } else if (
+          !nextState.isPaid &&
+          ["FAILED", "CANCELLED", "EXPIRED"].includes(nextState.orderStatus) &&
+          order.referralVoucher?.status === "RESERVED"
+        ) {
+          const now = new Date();
+          await transaction.referralVoucher.updateMany({
+            where: {
+              id: order.referralVoucher.id,
+              orderId: order.id,
+              status: "RESERVED",
+              expiresAt: { lte: now },
+            },
+            data: { status: "EXPIRED", orderId: null },
+          });
+          await transaction.referralVoucher.updateMany({
+            where: {
+              id: order.referralVoucher.id,
+              orderId: order.id,
+              status: "RESERVED",
+              expiresAt: { gt: now },
+            },
+            data: { status: "AVAILABLE", orderId: null },
+          });
+        }
+
+        if (nextState.isPaid && !order.partnerAccountId) {
+          const promotionSettings = await transaction.promotionSettings.findUnique({
+            where: { id: "global" },
+            select: { referralActive: true },
+          });
+          const referral = promotionSettings?.referralActive
+            ? await transaction.referral.findUnique({
+                where: { referredUserId: order.userId },
+                select: { id: true, referrerId: true, status: true },
+              })
+            : null;
+          const previousPaidOrders = referral?.status === "PENDING" && promotionSettings?.referralActive
+            ? await transaction.order.count({
+                where: {
+                  userId: order.userId,
+                  partnerAccountId: null,
+                  status: "PAID",
+                  id: { not: order.id },
+                },
+              })
+            : 1;
+          if (referral && shouldIssueReferralReward({
+            referralEnabled: promotionSettings?.referralActive === true,
+            isOrdinaryBuyer: !order.partnerAccountId,
+            referralPending: referral.status === "PENDING",
+            hasPreviousPaidOrder: previousPaidOrders > 0,
+          })) {
+            const claim = await transaction.referral.updateMany({
+              where: { id: referral.id, status: "PENDING", rewardOrderId: null },
+              data: {
+                status: "REWARDED",
+                rewardOrderId: order.id,
+                rewardedAt: new Date(),
+              },
+            });
+            if (claim.count === 1) {
+              const expiresAt = new Date();
+              expiresAt.setMonth(expiresAt.getMonth() + 6);
+              await transaction.referralVoucher.create({
+                data: {
+                  ownerId: referral.referrerId,
+                  referralId: referral.id,
+                  amount: new Prisma.Decimal(20_000),
+                  expiresAt,
+                },
+              });
+            }
+          }
+        }
 
         if (order.eventId && nextState.isPaid) {
           const snapshot = parsePackageSnapshot(order.packageSnapshot);

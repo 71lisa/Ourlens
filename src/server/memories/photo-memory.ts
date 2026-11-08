@@ -31,7 +31,7 @@ export function buildMemoryCreateInput(input: {
         uploadStatus: "COMPLETE",
         processingStatus: "SKIPPED",
         aiStatus: "NONE",
-        moderationStatus: "PENDING",
+        moderationStatus: "APPROVED",
         caption,
         expiresAt: input.expiresAt,
       },

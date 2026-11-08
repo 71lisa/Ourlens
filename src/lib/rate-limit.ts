@@ -9,9 +9,13 @@ export type RateLimitResult = {
 };
 
 export function getRateLimitClientKey(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
   const realIp = request.headers.get("x-real-ip")?.trim();
-  return (forwardedFor || realIp || "unknown").slice(0, 128);
+  const forwardedFor = request.headers.get("x-forwarded-for")
+    ?.split(",")
+    .map((address) => address.trim())
+    .filter(Boolean)
+    .pop();
+  return (realIp || forwardedFor || "unknown").slice(0, 128);
 }
 
 export function consumeRateLimit(

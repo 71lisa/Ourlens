@@ -18,7 +18,7 @@ export function CopyEventLink({ url }: { url: string }) {
 
   return (
     <Button type="button" variant="outline" onClick={copyLink}>
-      {copied ? "Copied" : "Copy event link"}
+      {copied ? "Tersalin" : "Salin tautan acara"}
     </Button>
   );
 }

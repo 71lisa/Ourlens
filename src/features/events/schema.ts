@@ -12,11 +12,11 @@ export const EVENT_TYPES = [
 ] as const;
 
 const eventScheduleFields = {
-  eventDate: z.iso.date("Choose a valid start date."),
-  startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Choose a valid start time."),
-  endDate: z.iso.date("Choose a valid end date."),
-  endTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Choose a valid end time."),
-  timeZone: z.string().trim().min(1, "Enter the event time zone.").max(100),
+  eventDate: z.iso.date("Pilih tanggal mulai yang valid."),
+  startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Pilih waktu mulai yang valid."),
+  endDate: z.iso.date("Pilih tanggal berakhir yang valid."),
+  endTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Pilih waktu berakhir yang valid."),
+  timeZone: z.string().trim().min(1, "Masukkan zona waktu acara.").max(100),
 };
 
 export type EventScheduleInput = {
@@ -33,7 +33,7 @@ function validateEventSchedule(value: EventScheduleInput, context: z.RefinementC
     context.addIssue({
       code: "custom",
       path: ["timeZone"],
-      message: "Choose a valid time and time zone. Times skipped or repeated by daylight saving are not supported.",
+      message: "Pilih waktu dan zona waktu yang valid. Waktu yang terlewat atau berulang akibat perubahan waktu musim tidak didukung.",
     });
     return;
   }
@@ -41,7 +41,7 @@ function validateEventSchedule(value: EventScheduleInput, context: z.RefinementC
     context.addIssue({
       code: "custom",
       path: ["endTime"],
-      message: "The event end must be after its start.",
+      message: "Waktu berakhir harus setelah waktu mulai.",
     });
   }
 }
@@ -49,20 +49,25 @@ function validateEventSchedule(value: EventScheduleInput, context: z.RefinementC
 export const eventScheduleSchema = z.object(eventScheduleFields).superRefine(validateEventSchedule);
 
 export const createEventSchema = z.object({
-  name: z.string().trim().min(1, "Enter an event name.").max(120, "Event names must be 120 characters or fewer."),
-  eventType: z.enum(EVENT_TYPES, { error: "Choose an event type." }),
+  name: z.string().trim().min(1, "Masukkan nama acara.").max(120, "Nama acara maksimal 120 karakter."),
+  organizerName: z.string().trim().max(120, "Nama penyelenggara maksimal 120 karakter.").optional(),
+  eventType: z.enum(EVENT_TYPES, { error: "Pilih jenis acara." }),
   ...eventScheduleFields,
-  location: z.string().trim().max(160, "Location must be 160 characters or fewer.").optional(),
-  description: z.string().trim().max(500, "Description must be 500 characters or fewer.").optional(),
+  location: z.string().trim().max(160, "Lokasi maksimal 160 karakter.").optional(),
+  description: z.string().trim().max(500, "Deskripsi maksimal 500 karakter.").optional(),
   coverImageUrl: z
-    .union([z.literal(""), z.url("Enter a valid cover image URL.")])
+    .union([z.literal(""), z.url("Masukkan tautan gambar sampul yang valid.")])
     .optional()
     .transform((value) => value || undefined)
     .refine((value) => !value || ["http:", "https:"].includes(new URL(value).protocol), {
-      message: "Cover image URLs must use HTTPS or HTTP.",
+      message: "Tautan gambar sampul harus menggunakan HTTPS atau HTTP.",
     }),
-  privacyMode: z.enum(["PUBLIC_LINK", "PRIVATE"], { error: "Choose an event privacy setting." }),
-  packageId: z.string().min(1, "Choose a package."),
+  privacyMode: z.enum(["PUBLIC_LINK", "PRIVATE"], { error: "Pilih pengaturan privasi acara." }),
+  packageId: z.string().min(1, "Pilih paket."),
+  filter: z.enum(["ORIGINAL", "DISPOSABLE_CAM", "VINTAGE_FILM", "RETRO", "CLASSIC"])
+    .default("ORIGINAL"),
+  frame: z.enum(["NO_FRAME", "POLAROID_WHITE", "POLAROID_VINTAGE", "FILM_FRAME", "MINIMAL_FRAME"])
+    .default("NO_FRAME"),
 }).superRefine((value, context) => {
   validateEventSchedule(value, context);
 });

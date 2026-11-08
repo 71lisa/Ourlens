@@ -1,19 +1,19 @@
 import { Container, PageHeader } from "@/components/layout/page-header";
 
 const steps = [
-  "An organizer creates an event.",
-  "OurLens generates a unique URL and QR code.",
-  "Guests scan with their phones — no app required.",
-  "Photos, videos, and messages collect in one gallery.",
+  "Penyelenggara membuat acara.",
+  "OurLens menghasilkan URL dan kode QR unik.",
+  "Tamu memindai dengan ponsel mereka — tidak perlu aplikasi.",
+  "Foto, video, dan pesan terkumpul dalam satu galeri.",
 ];
 
 export default function HowItWorksPage() {
   return (
     <Container className="py-16">
       <PageHeader
-        eyebrow="How it works"
-        title="Scan → Capture → Share → Collect → Relive"
-        description="This page will grow into a full walkthrough. The guest path stays mobile-first and lightweight."
+        eyebrow="Cara kerja"
+        title="Pindai → Ambil → Bagikan → Kumpulkan → Kenang Kembali"
+        description="Panduan praktis untuk berbagi momen acara. Pengalaman tamu dirancang agar nyaman digunakan di ponsel."
       />
       <ol className="mt-12 max-w-xl space-y-4">
         {steps.map((step, index) => (

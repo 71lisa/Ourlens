@@ -7,8 +7,8 @@ export async function GET(
   { params }: { params: Promise<{ eventId: string; mediaAssetId: string }> },
 ) {
   const session = await auth();
-  if (!session?.user || !["ADMIN", "ORGANIZER"].includes(session.user.role)) {
-    return new Response("Unauthorized", { status: 401 });
+  if (!session?.user || !["ADMIN", "ORGANIZER", "PARTNER"].includes(session.user.role)) {
+    return new Response("Anda tidak memiliki izin.", { status: 401 });
   }
 
   const { eventId, mediaAssetId } = await params;
@@ -24,7 +24,7 @@ export async function GET(
     },
     select: { originalStorageKey: true, optimizedStorageKey: true, mimeType: true },
   });
-  if (!asset) return new Response("Not found", { status: 404 });
+  if (!asset) return new Response("Media tidak ditemukan.", { status: 404 });
 
   try {
     const bytes = await getStorageService().getObject(asset.optimizedStorageKey ?? asset.originalStorageKey);
@@ -37,6 +37,6 @@ export async function GET(
     });
   } catch (error) {
     console.error("[moderation-preview] Stored photo could not be read.", error);
-    return new Response("Media unavailable", { status: 503 });
+    return new Response("Media tidak tersedia.", { status: 503 });
   }
 }

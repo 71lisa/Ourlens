@@ -11,7 +11,7 @@ export function Skeleton({ className, ...props }: HTMLAttributes<HTMLDivElement>
   );
 }
 
-export function LoadingState({ label = "Loading" }: { label?: string }) {
+export function LoadingState({ label = "Memuat" }: { label?: string }) {
   return (
     <div className="flex items-center gap-3 text-sm text-charcoal/70" role="status">
       <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-burgundy/20 border-t-burgundy" />

@@ -2,6 +2,8 @@ import type { Package } from "@prisma/client";
 
 export type PackageSnapshot = {
   name: string;
+  guestCapacity?: number | null;
+  isUnlimited?: boolean;
   price: string;
   currency: string;
   storageLimitBytes: string;
@@ -24,6 +26,8 @@ export type PackageSnapshot = {
 export function createPackageSnapshot(item: Package): PackageSnapshot {
   return {
     name: item.name,
+    guestCapacity: item.guestCapacity,
+    isUnlimited: item.isUnlimited,
     price: item.price.toString(),
     currency: item.currency,
     storageLimitBytes: item.storageLimitBytes.toString(),
@@ -55,6 +59,16 @@ export function parsePackageSnapshot(value: unknown): PackageSnapshot | null {
     typeof record.retentionDays !== "number" ||
     typeof record.eventDurationDays !== "number"
   ) {
+    return null;
+  }
+  if (
+    record.guestCapacity !== undefined &&
+    record.guestCapacity !== null &&
+    typeof record.guestCapacity !== "number"
+  ) {
+    return null;
+  }
+  if (record.isUnlimited !== undefined && typeof record.isUnlimited !== "boolean") {
     return null;
   }
   return record as PackageSnapshot;

@@ -1,14 +1,15 @@
 export const siteConfig = {
   name: "OurLens",
-  tagline: "One Event. Hundreds of Perspectives.",
+  tagline: "Satu Acara. Ratusan Perspektif.",
   description:
-    "Turn every guest into a storyteller and collect the moments your camera might miss.",
+    "Jadikan setiap tamu sebagai pencerita dan kumpulkan momen yang mungkin terlewatkan kameramu.",
   url: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
 };
 
 export const navLinks = [
-  { href: "/how-it-works", label: "How it works" },
-  { href: "/pricing", label: "Pricing" },
-  { href: "/about", label: "About" },
+  { href: "/how-it-works", label: "Cara kerja" },
+  { href: "/pricing", label: "Harga" },
+  { href: "/about", label: "Tentang" },
   { href: "/faq", label: "FAQ" },
+  { href: "/partner/apply", label: "Kemitraan EO" },
 ] as const;

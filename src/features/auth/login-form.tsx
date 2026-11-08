@@ -7,14 +7,15 @@ import { Input } from "@/components/ui/input";
 
 const initial: AuthActionState = {};
 
-export function LoginForm() {
+export function LoginForm({ callbackUrl }: { callbackUrl: string }) {
   const [state, formAction, pending] = useActionState(loginAction, initial);
 
   return (
     <form action={formAction} className="space-y-4">
+      <input type="hidden" name="callbackUrl" value={callbackUrl} />
       <Input label="Email" name="email" type="email" autoComplete="email" required />
       <Input
-        label="Password"
+        label="Kata sandi"
         name="password"
         type="password"
         autoComplete="current-password"
@@ -26,7 +27,7 @@ export function LoginForm() {
         </p>
       ) : null}
       <Button type="submit" className="w-full" disabled={pending}>
-        {pending ? "Signing in…" : "Log in"}
+        {pending ? "Memproses masuk…" : "Masuk"}
       </Button>
     </form>
   );

@@ -36,8 +36,8 @@ export function MediaStudio({
   onShare: (editedPhoto: File, caption: string) => Promise<void>;
   onRetake: () => void;
 }) {
-  const [filter, setFilter] = useState<PhotoFilterId>("original");
-  const [frame, setFrame] = useState<PhotoFrameId>("none");
+  const [filter, setFilter] = useState<PhotoFilterId>("ORIGINAL");
+  const [frame, setFrame] = useState<PhotoFrameId>("NO_FRAME");
   const [enhanced, setEnhanced] = useState(false);
   const [panel, setPanel] = useState<StudioPanel>("filter");
   const [processing, setProcessing] = useState(false);
@@ -47,8 +47,8 @@ export function MediaStudio({
   const selectedFrame = PHOTO_FRAMES.find((item) => item.id === frame) ?? PHOTO_FRAMES[0];
 
   function resetEdits() {
-    setFilter("original");
-    setFrame("none");
+    setFilter("ORIGINAL");
+    setFrame("NO_FRAME");
     setEnhanced(false);
     setPanel("filter");
     setError("");
@@ -62,6 +62,8 @@ export function MediaStudio({
       const blob = await getLocalImageProcessingService().renderPhoto(original, {
         filter,
         frame,
+        eventName: "Acara OurLens",
+        eventDate: "",
         enhanced,
       });
       const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -69,50 +71,49 @@ export function MediaStudio({
       if (!validation.ok) throw new Error(validation.error);
       await onShare(new File([blob], "ourlens-edited-memory.jpg", { type: validation.mimeType }), caption);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "This photo could not be prepared. Try another image.");
+      setError(reason instanceof Error ? reason.message : "Foto tidak dapat disiapkan. Coba pilih gambar lain.");
     } finally {
       setProcessing(false);
     }
   }
 
   return (
-    <section className="space-y-5" aria-label="Media Studio">
+    <section className="space-y-5" aria-label="Studio foto">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-xs uppercase tracking-[0.2em] text-burgundy">OurLens · Media Studio</p>
-          <h2 className="mt-1 font-display text-2xl">Make it yours.</h2>
+          <p className="text-xs uppercase tracking-[0.2em] text-burgundy">OurLens · Studio Foto</p>
+          <h2 className="mt-1 font-display text-2xl">Jadikan milikmu.</h2>
         </div>
-        <Button type="button" variant="ghost" size="sm" onClick={resetEdits}>Reset</Button>
+        <Button type="button" variant="ghost" size="sm" onClick={resetEdits}>Atur ulang</Button>
       </div>
 
       <div className="mx-auto w-full max-w-xl">
         <div className={cn("relative flex aspect-[4/3] items-center justify-center overflow-hidden", selectedFrame.previewFrameClassName)}>
           <Image
             src={previewUrl}
-            alt="Photo edit preview"
+            alt="Pratinjau foto yang diedit"
             width={1200}
             height={900}
             unoptimized
             className={cn("object-contain", selectedFrame.previewImageClassName)}
             style={{ filter: `${selectedFilter.cssFilter}${enhanced ? " brightness(1.06) contrast(1.1) saturate(1.08)" : ""}` }}
           />
-          {frame === "film-strip" ? (
+          {frame === "FILM_FRAME" ? (
             <div aria-hidden className="pointer-events-none absolute inset-y-0 left-0 flex w-[9%] flex-col justify-around py-1">
               {[0, 1, 2, 3, 4].map((hole) => <span key={hole} className="mx-auto h-2 w-3/5 bg-beige" />)}
             </div>
           ) : null}
-          {frame === "film-strip" ? (
+          {frame === "FILM_FRAME" ? (
             <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 flex w-[9%] flex-col justify-around py-1">
               {[0, 1, 2, 3, 4].map((hole) => <span key={hole} className="mx-auto h-2 w-3/5 bg-beige" />)}
             </div>
           ) : null}
-          {frame === "wedding" ? <span aria-hidden className="pointer-events-none absolute inset-[5%] border border-beige" /> : null}
-          {frame === "celebration" ? <span aria-hidden className="pointer-events-none absolute inset-[5%] border border-burgundy/35" /> : null}
+          {frame === "MINIMAL_FRAME" ? <span aria-hidden className="pointer-events-none absolute inset-[5%] border border-beige" /> : null}
         </div>
       </div>
 
       <div className="border-y border-charcoal/10">
-        <div role="tablist" aria-label="Photo treatments" className="grid grid-cols-3 border-b border-charcoal/10">
+        <div role="tablist" aria-label="Perawatan foto" className="grid grid-cols-3 border-b border-charcoal/10">
           {(["filter", "frame", "enhance"] as const).map((item) => (
             <button
               key={item}
@@ -122,13 +123,13 @@ export function MediaStudio({
               onClick={() => setPanel(item)}
               className={cn("min-h-12 border-b-2 px-3 text-xs font-medium uppercase tracking-[0.16em]", panel === item ? "border-burgundy text-burgundy" : "border-transparent text-charcoal/55")}
             >
-              {item}
+              {item === "filter" ? "Filter" : item === "frame" ? "Bingkai" : "Tingkatkan"}
             </button>
           ))}
         </div>
 
         {panel === "filter" ? (
-          <div className="flex gap-3 overflow-x-auto py-4" role="group" aria-label="Choose a filter">
+          <div className="flex gap-3 overflow-x-auto py-4" role="group" aria-label="Pilih filter">
             {PHOTO_FILTERS.map((item) => (
               <button
                 key={item.id}
@@ -147,7 +148,7 @@ export function MediaStudio({
         ) : null}
 
         {panel === "frame" ? (
-          <div className="flex gap-3 overflow-x-auto py-4" role="group" aria-label="Choose a frame">
+          <div className="flex gap-3 overflow-x-auto py-4" role="group" aria-label="Pilih bingkai">
             {PHOTO_FRAMES.map((item) => (
               <button
                 key={item.id}
@@ -169,25 +170,25 @@ export function MediaStudio({
 
         {panel === "enhance" ? (
           <div className="space-y-3 py-4">
-            <div className="flex gap-2" role="group" aria-label="Enhancement preview">
-              <Button type="button" size="sm" variant={!enhanced ? "primary" : "outline"} aria-pressed={!enhanced} onClick={() => setEnhanced(false)}>Original</Button>
-              <Button type="button" size="sm" variant={enhanced ? "primary" : "outline"} aria-pressed={enhanced} onClick={() => setEnhanced(true)}>Enhanced</Button>
+            <div className="flex gap-2" role="group" aria-label="Pratinjau peningkatan">
+              <Button type="button" size="sm" variant={!enhanced ? "primary" : "outline"} aria-pressed={!enhanced} onClick={() => setEnhanced(false)}>Asli</Button>
+              <Button type="button" size="sm" variant={enhanced ? "primary" : "outline"} aria-pressed={enhanced} onClick={() => setEnhanced(true)}>Tingkatkan</Button>
             </div>
-            <p className="text-xs text-charcoal/60">A local brightness, contrast, and color adjustment. No AI service is used.</p>
+            <p className="text-xs text-charcoal/60">Penyesuaian kecerahan, kontras, dan warna secara lokal. Tidak ada layanan kecerdasan buatan yang digunakan.</p>
           </div>
         ) : null}
       </div>
 
       {error ? <p role="alert" className="text-sm text-burgundy">{error}</p> : null}
-      {processing ? <p role="status" className="text-sm text-charcoal/65">Preparing your edited photo…</p> : null}
+      {processing ? <p role="status" className="text-sm text-charcoal/65">Menyiapkan foto hasil edit Anda…</p> : null}
       <label className="block space-y-1.5">
-        <span className="text-sm font-medium">Add a note <span className="font-normal text-charcoal/50">(optional)</span></span>
+        <span className="text-sm font-medium">Tambahkan catatan <span className="font-normal text-charcoal/50">(opsional)</span></span>
         <textarea
           value={caption}
           onChange={(event) => onCaptionChange(event.target.value.slice(0, 300))}
           maxLength={300}
           rows={3}
-          placeholder="Best day ever…"
+          placeholder="Hari terbaik sepanjang masa…"
           className="w-full border border-charcoal/15 bg-white px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-burgundy"
         />
         <span className="block text-right text-xs text-charcoal/50">{caption.length}/300</span>
@@ -196,9 +197,9 @@ export function MediaStudio({
         <EventChallengeSelector prompts={challengePrompts} value={selectedChallengeId} onChange={onChallengeChange} />
       ) : null}
       <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
-        <Button type="button" variant="ghost" onClick={onRetake} disabled={processing || busy}>Retake</Button>
+        <Button type="button" variant="ghost" onClick={onRetake} disabled={processing || busy}>Ambil ulang</Button>
         <Button type="button" size="lg" onClick={sharePhoto} disabled={processing || busy || !sessionReady}>
-          {busy ? "Uploading your memory…" : processing ? "Preparing…" : !sessionReady ? "Preparing guest session…" : "Share Memory"}
+          {busy ? "Mengunggah kenangan Anda…" : processing ? "Menyiapkan…" : !sessionReady ? "Menyiapkan sesi tamu…" : "Bagikan Kenangan"}
         </Button>
       </div>
     </section>

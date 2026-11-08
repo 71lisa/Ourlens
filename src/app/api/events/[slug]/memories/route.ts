@@ -1,22 +1,32 @@
 import { Prisma } from "@prisma/client";
+import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 import { hashGuestToken, readGuestToken } from "@/lib/guest-token";
 import {
   MAX_PHOTO_UPLOAD_BYTES,
-  MAX_VIDEO_UPLOAD_BYTES,
   validateMediaFile,
   validatePhotoPayload,
-  validateVideoPayload,
 } from "@/lib/media/file-validation";
-import { consumeRateLimit } from "@/lib/rate-limit";
+import { consumeRateLimit, getRateLimitClientKey } from "@/lib/rate-limit";
 import { buildStorageKey, isSafeStorageKey } from "@/lib/storage-keys";
 import { canAcceptGuestContributions } from "@/server/authorization/policies";
 import { prisma } from "@/server/db/prisma";
+import { isPhotoLimitReached } from "@/server/promotions/free-trial";
+import {
+  getPackageGuestCapacity,
+  getRemainingPhotoQuota,
+  GUEST_PHOTO_LIMIT,
+  hasGuestUploadCapacity,
+} from "@/lib/photo-quota";
 import { buildMemoryCreateInput } from "@/server/memories/photo-memory";
+import { DEFAULT_PHOTO_EXPERIENCE } from "@/features/memories/media-studio-config";
+import { InvalidPhotoError, renderGuestPhoto } from "@/services/media/image-processing/server";
 import { getStorageService } from "@/services/storage";
+import { hasValidRequestOrigin } from "@/lib/request-origin";
+import { parsePackageSnapshot } from "@/server/packages/snapshot";
 
 const CAPTION_MAX_LENGTH = 300;
-const MAX_UPLOAD_REQUEST_BYTES = MAX_VIDEO_UPLOAD_BYTES + 64 * 1024;
+const MAX_UPLOAD_REQUEST_BYTES = MAX_PHOTO_UPLOAD_BYTES * 2 + 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 function safeCaption(value: FormDataEntryValue | null): string | undefined {
@@ -34,9 +44,8 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== new URL(request.url).origin) {
-    return NextResponse.json({ error: "Request could not be verified." }, { status: 403 });
+  if (!hasValidRequestOrigin(request)) {
+    return NextResponse.json({ error: "Permintaan tidak dapat diverifikasi." }, { status: 403 });
   }
 
   const { slug } = await params;
@@ -44,33 +53,39 @@ export async function POST(
     where: { slug },
     select: {
       id: true,
+      name: true,
+      eventDate: true,
       privacyMode: true,
       status: true,
       expiresAt: true,
       startsAt: true,
       endsAt: true,
       timeZone: true,
-      orders: { where: { status: "PAID" }, select: { id: true }, take: 1 },
+      orders: { where: { status: "PAID" }, select: { id: true, packageSnapshot: true }, take: 1 },
+      freeTrial: { select: { photoLimit: true } },
       package: {
         select: {
+          name: true,
+          guestCapacity: true,
+          isUnlimited: true,
           retentionDays: true,
-          photoLimit: true,
-          videoLimit: true,
-          videoDurationLimit: true,
         },
       },
       storageUsage: { select: { id: true } },
+      photoExperience: { select: { filter: true, frame: true } },
     },
   });
-  const guestAccessEvent = event ? { ...event, isPaid: event.orders.length > 0 } : null;
+  const guestAccessEvent = event
+    ? { ...event, isPaid: event.orders.length > 0, isTrial: Boolean(event.freeTrial) }
+    : null;
   const now = new Date();
   if (!event || !guestAccessEvent || !canAcceptGuestContributions(guestAccessEvent, now)) {
-    return NextResponse.json({ error: "This event is not available for contributions." }, { status: 404 });
+    return NextResponse.json({ error: "Acara ini tidak menerima kontribusi." }, { status: 404 });
   }
 
   const token = readGuestToken(request, slug);
   if (!token) {
-    return NextResponse.json({ error: "Start a guest session before uploading." }, { status: 401 });
+    return NextResponse.json({ error: "Mulai sesi tamu sebelum mengunggah." }, { status: 401 });
   }
 
   const guestSession = await prisma.guestSession.findFirst({
@@ -82,7 +97,22 @@ export async function POST(
     select: { id: true },
   });
   if (!guestSession) {
-    return NextResponse.json({ error: "Your guest session expired. Reopen this event to continue." }, { status: 401 });
+    return NextResponse.json({ error: "Sesi tamu Anda telah berakhir. Buka kembali acara ini untuk melanjutkan." }, { status: 401 });
+  }
+
+  const ipUploadLimit = consumeRateLimit(
+    `guest-upload-ip:${event.id}:${getRateLimitClientKey(request)}`,
+    20,
+    RATE_LIMIT_WINDOW_MS,
+  );
+  if (!ipUploadLimit.allowed) {
+    return NextResponse.json(
+      { error: "Terlalu banyak unggahan dari jaringan ini. Silakan tunggu sebelum mencoba lagi." },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil(ipUploadLimit.retryAfterMs / 1000)) },
+      },
+    );
   }
 
   const uploadLimit = consumeRateLimit(
@@ -92,7 +122,7 @@ export async function POST(
   );
   if (!uploadLimit.allowed) {
     return NextResponse.json(
-      { error: "Too many uploads. Please wait before trying again." },
+      { error: "Terlalu banyak unggahan. Silakan tunggu sebelum mencoba lagi." },
       {
         status: 429,
         headers: { "Retry-After": String(Math.ceil(uploadLimit.retryAfterMs / 1000)) },
@@ -102,54 +132,43 @@ export async function POST(
 
   const contentLength = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_REQUEST_BYTES) {
-    return NextResponse.json({ error: "This upload is larger than the event allows." }, { status: 413 });
+    return NextResponse.json({ error: "Ukuran unggahan melebihi batas acara." }, { status: 413 });
   }
 
   let formData: FormData;
   try {
     formData = await request.formData();
   } catch {
-    return NextResponse.json({ error: "Choose a valid media file to upload." }, { status: 400 });
+    return NextResponse.json({ error: "Pilih foto yang valid untuk diunggah." }, { status: 400 });
   }
 
   const kindValue = formData.get("kind");
-  if (kindValue !== "photo" && kindValue !== "video") {
-    return NextResponse.json({ error: "Choose a valid media type." }, { status: 400 });
+  if (kindValue !== "photo") {
+    return NextResponse.json({ error: "Hanya unggahan foto yang didukung." }, { status: 400 });
   }
-  const kind = kindValue;
-  const mediaEntry = formData.get(kind);
+  const mediaEntry = formData.get("photo");
   if (!(mediaEntry instanceof File)) {
-    return NextResponse.json(
-      { error: kind === "video" ? "Choose an MP4 or MOV video." : "Choose a photo to upload." },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Pilih foto untuk diunggah." }, { status: 400 });
   }
 
   const originalEntry = formData.get("original");
-  if (
-    (originalEntry !== null && !(originalEntry instanceof File)) ||
-    (kind === "video" && originalEntry !== null)
-  ) {
-    return NextResponse.json({ error: "The original media is invalid." }, { status: 400 });
+  if (originalEntry !== null && !(originalEntry instanceof File)) {
+    return NextResponse.json({ error: "Berkas media asli tidak valid." }, { status: 400 });
   }
   const original = originalEntry instanceof File ? originalEntry : mediaEntry;
-  const maxFileSize = kind === "photo" ? MAX_PHOTO_UPLOAD_BYTES : MAX_VIDEO_UPLOAD_BYTES;
   for (const file of original === mediaEntry ? [mediaEntry] : [mediaEntry, original]) {
-    if (file.size > maxFileSize) {
-      return NextResponse.json(
-        { error: kind === "photo" ? "Choose a photo smaller than 8 MB." : "Choose a video smaller than 100 MB." },
-        { status: 413 },
-      );
+    if (file.size > MAX_PHOTO_UPLOAD_BYTES) {
+      return NextResponse.json({ error: "Pilih foto yang ukurannya kurang dari 8 MB." }, { status: 413 });
     }
     const preliminaryValidation = validateMediaFile({
       mimeType: file.type,
       fileSize: file.size,
-      kind,
+      kind: "photo",
       fileName: file.name,
     });
     if (!preliminaryValidation.ok) {
       return NextResponse.json(
-        { error: preliminaryValidation.error ?? "This media is not valid." },
+        { error: preliminaryValidation.error ?? "Berkas media ini tidak valid." },
         { status: 400 },
       );
     }
@@ -157,53 +176,55 @@ export async function POST(
 
   const idempotencyKey = formData.get("idempotencyKey");
   if (!isIdempotencyKey(idempotencyKey)) {
-    return NextResponse.json({ error: "This upload request is invalid. Please try again." }, { status: 400 });
+    return NextResponse.json({ error: "Permintaan unggahan tidak valid. Silakan coba lagi." }, { status: 400 });
   }
   if (!event.storageUsage) {
-    return NextResponse.json({ error: "Storage is not configured for this event." }, { status: 409 });
+    return NextResponse.json({ error: "Penyimpanan belum dikonfigurasi untuk acara ini." }, { status: 409 });
   }
 
   const bytes = new Uint8Array(await mediaEntry.arrayBuffer());
   const originalBytes = original === mediaEntry
     ? bytes
     : new Uint8Array(await original.arrayBuffer());
-  const photoValidation = kind === "photo"
-    ? validatePhotoPayload({
-        bytes,
-        mimeType: mediaEntry.type,
-        fileSize: mediaEntry.size,
-        fileName: mediaEntry.name,
-      })
-    : undefined;
-  const originalPhotoValidation = kind === "photo"
-    ? validatePhotoPayload({
+  const photoValidation = validatePhotoPayload({
+    bytes,
+    mimeType: mediaEntry.type,
+    fileSize: mediaEntry.size,
+    fileName: mediaEntry.name,
+  });
+  const originalPhotoValidation = original === mediaEntry
+    ? photoValidation
+    : validatePhotoPayload({
         bytes: originalBytes,
         mimeType: original.type,
         fileSize: original.size,
         fileName: original.name,
-      })
-    : undefined;
-  const videoValidation = kind === "video"
-    ? validateVideoPayload({
-        bytes,
-        mimeType: mediaEntry.type,
-        fileSize: mediaEntry.size,
-        maxDurationSeconds: event.package?.videoDurationLimit ?? 0,
-        fileName: mediaEntry.name,
-      })
-    : undefined;
+      });
 
-  if (photoValidation && !photoValidation.ok) {
+  if (!photoValidation.ok) {
     return NextResponse.json({ error: photoValidation.error }, { status: 400 });
   }
-  if (originalPhotoValidation && !originalPhotoValidation.ok) {
+  if (!originalPhotoValidation.ok) {
     return NextResponse.json(
       { error: `Original media: ${originalPhotoValidation.error}` },
       { status: 400 },
     );
   }
-  if (videoValidation && !videoValidation.ok) {
-    return NextResponse.json({ error: videoValidation.error }, { status: 400 });
+  let processedPhotoBytes: Buffer;
+  try {
+    processedPhotoBytes = await renderGuestPhoto({
+      bytes: originalBytes,
+      filter: event.photoExperience?.filter ?? DEFAULT_PHOTO_EXPERIENCE.filter,
+      frame: event.photoExperience?.frame ?? DEFAULT_PHOTO_EXPERIENCE.frame,
+      eventName: event.name,
+      eventDate: event.eventDate,
+    });
+  } catch (error) {
+    if (error instanceof InvalidPhotoError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    console.error("[guest-upload] Photo processing failed.", error);
+    return NextResponse.json({ error: "Foto tidak dapat diproses. Silakan coba gambar lain." }, { status: 500 });
   }
 
   const challengeId = formData.get("challengeId");
@@ -217,21 +238,16 @@ export async function POST(
       })
     : null;
   if (challengeId && !selectedChallenge) {
-    return NextResponse.json({ error: "This event challenge is no longer available." }, { status: 400 });
+    return NextResponse.json({ error: "Tantangan acara ini sudah tidak tersedia." }, { status: 400 });
   }
 
-  const mediaType = kind === "video" ? "VIDEO" : "PHOTO";
-  const storageKind = kind === "video" ? "video" : "photo";
+  const mediaType = "PHOTO";
+  const storageKind = "photo";
   const assetKey = crypto.randomUUID();
-  const originalMimeType = kind === "video"
-    ? videoValidation!.mimeType
-    : originalPhotoValidation!.mimeType;
-  const mediaMimeType = kind === "video"
-    ? originalMimeType
-    : photoValidation!.mimeType;
+  const originalMimeType = originalPhotoValidation.mimeType;
+  const mediaMimeType = "image/jpeg";
   const extensionFor = (mimeType: string) => {
     if (mimeType === "image/jpeg") return "jpg";
-    if (mimeType === "video/quicktime") return "mov";
     return mimeType.split("/")[1];
   };
   const originalStorageKey = buildStorageKey({
@@ -241,30 +257,39 @@ export async function POST(
     variant: "original",
     suffix: `.${extensionFor(originalMimeType)}`,
   });
-  const hasEditedPhoto = kind === "photo" && originalEntry instanceof File;
-  const optimizedStorageKey = hasEditedPhoto
-    ? buildStorageKey({
-        eventId: event.id,
-        mediaId: assetKey,
-        kind: storageKind,
-        variant: "edited",
-        suffix: `.${extensionFor(mediaMimeType)}`,
-      })
-    : undefined;
-  if (!isSafeStorageKey(originalStorageKey) || (optimizedStorageKey && !isSafeStorageKey(optimizedStorageKey))) {
-    return NextResponse.json({ error: "This media could not be placed in a safe storage location." }, { status: 400 });
+  const optimizedStorageKey = buildStorageKey({
+    eventId: event.id,
+    mediaId: assetKey,
+    kind: storageKind,
+    variant: "edited",
+    suffix: `.${extensionFor(mediaMimeType)}`,
+  });
+  if (!isSafeStorageKey(originalStorageKey) || !isSafeStorageKey(optimizedStorageKey)) {
+    return NextResponse.json({ error: "Berkas media ini tidak dapat disimpan di lokasi yang aman." }, { status: 400 });
   }
 
-  const storedBytes = BigInt(original.size + (optimizedStorageKey ? mediaEntry.size : 0));
+  const storedBytes = BigInt(originalBytes.byteLength + processedPhotoBytes.byteLength);
   const expiresAt = event.package
     ? new Date(now.getTime() + event.package.retentionDays * 24 * 60 * 60 * 1000)
     : undefined;
   const caption = safeCaption(formData.get("caption"));
   const storageKeys: string[] = [];
 
+  let result: {
+    duplicate: boolean;
+    photoQuota: {
+      scope: "guest" | "event";
+      uploaded: number;
+      limit: number;
+      remaining: number;
+      participantCount: number | null;
+      participantLimit: number | null;
+      canUpload: boolean;
+    };
+  };
   try {
     const storage = getStorageService();
-    const result = await prisma.$transaction(async (transaction) => {
+    result = await prisma.$transaction(async (transaction) => {
       await transaction.$queryRaw(
         Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${event.id}))::text`,
       );
@@ -281,11 +306,13 @@ export async function POST(
           startsAt: true,
           endsAt: true,
           timeZone: true,
-          orders: { where: { status: "PAID" }, select: { id: true }, take: 1 },
+          orders: { where: { status: "PAID" }, select: { id: true, packageSnapshot: true }, take: 1 },
+          freeTrial: { select: { photoLimit: true } },
+          package: { select: { name: true, guestCapacity: true, isUnlimited: true } },
         },
       });
       const currentGuestAccessEvent = currentEvent
-        ? { ...currentEvent, isPaid: currentEvent.orders.length > 0 }
+        ? { ...currentEvent, isPaid: currentEvent.orders.length > 0, isTrial: Boolean(currentEvent.freeTrial) }
         : null;
       if (!currentGuestAccessEvent || !canAcceptGuestContributions(currentGuestAccessEvent, new Date())) {
         throw new Error("UPLOAD_EVENT_CLOSED");
@@ -295,27 +322,87 @@ export async function POST(
         where: { eventId_idempotencyKey: { eventId: event.id, idempotencyKey } },
         select: { type: true, uploadStatus: true },
       });
+      const currentGuestPhotoCount = await transaction.mediaAsset.count({
+        where: {
+          eventId: event.id,
+          type: mediaType,
+          uploadStatus: "COMPLETE",
+          ...(currentEvent?.freeTrial
+            ? {}
+            : { memory: { is: { guestSessionId: guestSession.id } } }),
+        },
+      });
+      const trialLimit = currentEvent?.freeTrial?.photoLimit ?? 10;
+      const participantCount = currentEvent?.freeTrial
+        ? 0
+        : await transaction.guestSession.count({
+            where: {
+              eventId: event.id,
+              memories: {
+                some: {
+                  mediaAssets: {
+                    some: { type: "PHOTO", uploadStatus: "COMPLETE" },
+                  },
+                },
+              },
+            },
+          });
+      const packageSnapshot = parsePackageSnapshot(currentEvent?.orders[0]?.packageSnapshot);
+          const snapshotGuestCapacity = getPackageGuestCapacity(packageSnapshot);
+          const guestCapacity = snapshotGuestCapacity === 0
+            ? getPackageGuestCapacity(currentEvent?.package)
+            : snapshotGuestCapacity;
       if (existing) {
         if (existing.type !== mediaType) throw new Error("UPLOAD_IDEMPOTENCY_KEY_REUSED");
         if (existing.uploadStatus !== "COMPLETE") throw new Error("UPLOAD_ALREADY_IN_PROGRESS");
-        return { duplicate: true };
+        const remaining = getRemainingPhotoQuota(
+          currentGuestPhotoCount,
+          currentEvent?.freeTrial ? trialLimit : GUEST_PHOTO_LIMIT,
+        );
+        return {
+          duplicate: true,
+          photoQuota: {
+            scope: currentEvent?.freeTrial ? "event" : "guest",
+            uploaded: currentGuestPhotoCount,
+            limit: currentEvent?.freeTrial ? trialLimit : GUEST_PHOTO_LIMIT,
+            remaining,
+            participantCount: currentEvent?.freeTrial ? null : participantCount,
+            participantLimit: currentEvent?.freeTrial ? null : guestCapacity,
+            canUpload: currentEvent?.freeTrial
+              ? remaining > 0
+              : remaining > 0 && hasGuestUploadCapacity({
+                  participantCount,
+                  guestPhotoCount: currentGuestPhotoCount,
+                  guestCapacity,
+                }),
+          },
+        };
       }
 
-      const mediaLimit = kind === "photo" ? event.package?.photoLimit : event.package?.videoLimit;
-      if (mediaLimit !== null && mediaLimit !== undefined) {
-        const mediaCount = await transaction.mediaAsset.count({
-          where: { eventId: event.id, type: mediaType },
+      if (currentEvent?.freeTrial) {
+        const eventPhotoCount = await transaction.mediaAsset.count({
+          where: { eventId: event.id, type: mediaType, uploadStatus: "COMPLETE" },
         });
-        if (mediaCount >= mediaLimit) {
-          throw new Error(kind === "photo" ? "EVENT_PHOTO_LIMIT_REACHED" : "EVENT_VIDEO_LIMIT_REACHED");
+        if (isPhotoLimitReached(eventPhotoCount, trialLimit)) {
+          throw new Error("EVENT_PHOTO_LIMIT_REACHED");
+        }
+      } else {
+        if (isPhotoLimitReached(currentGuestPhotoCount, GUEST_PHOTO_LIMIT)) {
+          throw new Error("GUEST_PHOTO_LIMIT_REACHED");
+        }
+        if (!hasGuestUploadCapacity({
+          participantCount,
+          guestPhotoCount: currentGuestPhotoCount,
+          guestCapacity,
+        })) {
+          throw new Error("EVENT_GUEST_CAPACITY_REACHED");
         }
       }
 
-      const usageColumn = Prisma.raw(kind === "photo" ? '"photoBytes"' : '"videoBytes"');
       const reserved = await transaction.$executeRaw(Prisma.sql`
         UPDATE "StorageUsage"
         SET "usedBytes" = "usedBytes" + ${storedBytes},
-            ${usageColumn} = ${usageColumn} + ${storedBytes},
+            "photoBytes" = "photoBytes" + ${storedBytes},
             "updatedAt" = NOW()
         WHERE "eventId" = ${event.id}
           AND "quotaBytes" - "usedBytes" >= ${storedBytes}
@@ -328,14 +415,12 @@ export async function POST(
         body: originalBytes,
         contentType: originalMimeType,
       });
-      if (optimizedStorageKey) {
-        storageKeys.push(optimizedStorageKey);
-        await storage.putObject({
-          key: optimizedStorageKey,
-          body: bytes,
-          contentType: mediaMimeType,
-        });
-      }
+      storageKeys.push(optimizedStorageKey);
+      await storage.putObject({
+        key: optimizedStorageKey,
+        body: processedPhotoBytes,
+        contentType: mediaMimeType,
+      });
 
       const finalEvent = await transaction.event.findUnique({
         where: { id: event.id },
@@ -347,10 +432,11 @@ export async function POST(
           endsAt: true,
           timeZone: true,
           orders: { where: { status: "PAID" }, select: { id: true }, take: 1 },
+          freeTrial: { select: { id: true } },
         },
       });
       const finalGuestAccessEvent = finalEvent
-        ? { ...finalEvent, isPaid: finalEvent.orders.length > 0 }
+        ? { ...finalEvent, isPaid: finalEvent.orders.length > 0, isTrial: Boolean(finalEvent.freeTrial) }
         : null;
       if (!finalGuestAccessEvent || !canAcceptGuestContributions(finalGuestAccessEvent, new Date())) {
         throw new Error("UPLOAD_EVENT_CLOSED");
@@ -366,7 +452,6 @@ export async function POST(
           mimeType: mediaMimeType,
           fileSize: BigInt(original.size),
           caption,
-          duration: videoValidation?.durationSeconds,
           expiresAt,
         }),
       });
@@ -376,10 +461,30 @@ export async function POST(
         });
       }
 
-      return { duplicate: false };
+      const uploaded = currentGuestPhotoCount + 1;
+      const limit = currentEvent?.freeTrial ? trialLimit : GUEST_PHOTO_LIMIT;
+      const remaining = getRemainingPhotoQuota(uploaded, limit);
+      const participantsAfter = participantCount + (currentGuestPhotoCount === 0 ? 1 : 0);
+      return {
+        duplicate: false,
+        photoQuota: {
+          scope: currentEvent?.freeTrial ? "event" : "guest",
+          uploaded,
+          limit,
+          remaining,
+          participantCount: currentEvent?.freeTrial ? null : participantsAfter,
+          participantLimit: currentEvent?.freeTrial ? null : guestCapacity,
+          canUpload: currentEvent?.freeTrial
+            ? remaining > 0
+            : remaining > 0 && hasGuestUploadCapacity({
+                participantCount: participantsAfter,
+                guestPhotoCount: uploaded,
+                guestCapacity,
+              }),
+        },
+      };
     }, { maxWait: 10_000, timeout: 120_000 });
 
-    return NextResponse.json({ success: true }, { status: result.duplicate ? 200 : 201 });
   } catch (error) {
     for (const key of storageKeys) {
       try {
@@ -389,24 +494,34 @@ export async function POST(
       }
     }
     if (error instanceof Error && error.message === "UPLOAD_ALREADY_IN_PROGRESS") {
-      return NextResponse.json({ error: "This upload is already being processed. Please wait." }, { status: 409 });
+      return NextResponse.json({ error: "Unggahan ini sedang diproses. Silakan tunggu." }, { status: 409 });
     }
     if (error instanceof Error && error.message === "UPLOAD_EVENT_CLOSED") {
-      return NextResponse.json({ error: "This event is no longer accepting contributions." }, { status: 404 });
+      return NextResponse.json({ error: "Acara ini sudah tidak menerima kontribusi." }, { status: 404 });
     }
     if (error instanceof Error && error.message === "UPLOAD_IDEMPOTENCY_KEY_REUSED") {
-      return NextResponse.json({ error: "This upload request key has already been used." }, { status: 409 });
+      return NextResponse.json({ error: "Kunci permintaan unggahan ini sudah pernah digunakan." }, { status: 409 });
     }
     if (error instanceof Error && error.message === "EVENT_STORAGE_QUOTA_EXCEEDED") {
-      return NextResponse.json({ error: "This event has reached its storage limit." }, { status: 413 });
+      return NextResponse.json({ error: "Penyimpanan acara ini sudah mencapai batas." }, { status: 413 });
     }
     if (error instanceof Error && error.message === "EVENT_PHOTO_LIMIT_REACHED") {
-      return NextResponse.json({ error: "This event has reached its photo limit." }, { status: 413 });
+      return NextResponse.json({ error: "Acara ini sudah mencapai batas jumlah foto." }, { status: 413 });
     }
-    if (error instanceof Error && error.message === "EVENT_VIDEO_LIMIT_REACHED") {
-      return NextResponse.json({ error: "This event has reached its video limit." }, { status: 413 });
+    if (error instanceof Error && error.message === "GUEST_PHOTO_LIMIT_REACHED") {
+      return NextResponse.json({ error: "Batas unggah 20 foto telah tercapai." }, { status: 409 });
+    }
+    if (error instanceof Error && error.message === "EVENT_GUEST_CAPACITY_REACHED") {
+      return NextResponse.json({ error: "Kapasitas tamu acara sudah penuh. Tamu baru tidak dapat mengunggah foto." }, { status: 409 });
     }
     console.error("[guest-upload] Media upload failed.", error);
-    return NextResponse.json({ error: "We could not save this memory. Please try again." }, { status: 500 });
+    return NextResponse.json({ error: "Momen ini tidak dapat disimpan. Silakan coba lagi." }, { status: 500 });
   }
+
+  revalidatePath(`/e/${slug}/gallery`);
+  revalidatePath(`/dashboard/events/${event.id}`);
+  return NextResponse.json(
+    { success: true, photoQuota: result.photoQuota },
+    { status: result.duplicate ? 200 : 201 },
+  );
 }

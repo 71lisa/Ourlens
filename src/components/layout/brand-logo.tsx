@@ -1,26 +1,22 @@
 import Link from "next/link";
+import Image from "next/image";
 import { cn } from "@/lib/cn";
 
 type BrandLogoProps = {
-  variant?: "primary" | "light" | "dark";
+  href?: string;
   className?: string;
 };
 
-export function BrandLogo({ variant = "primary", className }: BrandLogoProps) {
-  const word = variant === "light" ? "#F7F1EA" : "#2E2E2E";
-  const ring = variant === "light" ? "#D4A37C" : "#8B0000";
-
+export function BrandLogo({ href = "/", className }: BrandLogoProps) {
   return (
-    <Link href="/" className={cn("inline-flex items-center gap-2", className)} aria-label="OurLens home">
-      <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden>
-        <circle cx="18" cy="18" r="15" fill="none" stroke={ring} strokeWidth="2.2" />
-        <circle cx="18" cy="18" r="7" fill="none" stroke={ring} strokeWidth="1.6" />
-        <circle cx="18" cy="18" r="2.2" fill={ring} />
-        <rect x="25" y="8" width="6" height="3.5" rx="0.6" fill={ring} />
-      </svg>
-      <span className="font-display text-2xl tracking-tight" style={{ color: word }}>
-        OurLens
-      </span>
+    <Link href={href} className={cn("inline-flex shrink-0 items-center", className)} aria-label="OurLens">
+      <Image
+        src="/brand/logo.png"
+        alt="OurLens"
+        width={364}
+        height={137}
+        className="h-11 w-auto object-contain"
+      />
     </Link>
   );
 }

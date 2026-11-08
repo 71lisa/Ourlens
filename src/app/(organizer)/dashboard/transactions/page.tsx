@@ -13,7 +13,15 @@ function money(amount: { toNumber(): number }, currency: string) {
 }
 
 function orderStatusLabel(status: string) {
-  return status.toLowerCase().replaceAll("_", " ");
+  const labels: Record<string, string> = {
+    PENDING: "Menunggu pembayaran",
+    PAID: "Lunas",
+    FAILED: "Gagal",
+    CANCELLED: "Dibatalkan",
+    EXPIRED: "Kedaluwarsa",
+    REFUNDED: "Dana dikembalikan",
+  };
+  return labels[status] ?? "Status lainnya";
 }
 
 export default async function TransactionsPage() {
@@ -23,7 +31,7 @@ export default async function TransactionsPage() {
 
   return (
     <div className="space-y-8">
-      <PageHeader title="Transactions" description="Your orders, payment status, and package history." />
+      <PageHeader title="Transaksi" description="Riwayat pesanan, status pembayaran, dan paket Anda." />
       {orders.length ? (
         <div className="divide-y divide-charcoal/10 border-y border-charcoal/10">
           {orders.map((order) => {
@@ -32,23 +40,23 @@ export default async function TransactionsPage() {
               <article key={order.id} className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-xs uppercase tracking-[0.16em] text-burgundy">{order.orderNumber}</p>
-                  <h2 className="mt-1 font-display text-xl">{order.event?.name ?? "Event unavailable"}</h2>
+                  <h2 className="mt-1 font-display text-xl">{order.event?.name ?? "Acara tidak tersedia"}</h2>
                   <p className="mt-1 text-sm text-charcoal/65">
-                    {snapshot?.name ?? "Package details unavailable"} · {money(order.amount, order.currency)}
+                    {snapshot?.name ?? "Detail paket tidak tersedia"} · {money(order.amount, order.currency)}
                   </p>
                   <p className="mt-1 text-xs capitalize text-charcoal/55">
-                    Order: {orderStatusLabel(order.status)} · Payment: {order.payments[0]?.status.toLowerCase() ?? "not started"} · {new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeZone: "UTC" }).format(order.createdAt)}
+                    Pesanan: {orderStatusLabel(order.status)} · Pembayaran: {order.payments[0]?.status ? orderStatusLabel(order.payments[0].status) : "belum dimulai"} · {new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeZone: "UTC" }).format(order.createdAt)}
                   </p>
                 </div>
                 <Link href={`/dashboard/transactions/${order.id}`} className={cn(buttonVariants({ variant: "outline" }))}>
-                  View transaction
+                  Lihat transaksi
                 </Link>
               </article>
             );
           })}
         </div>
       ) : (
-        <EmptyState title="No transactions yet" description="Orders created with your events will appear here." />
+        <EmptyState title="Belum ada transaksi" description="Pesanan yang dibuat untuk acara Anda akan muncul di sini." />
       )}
     </div>
   );

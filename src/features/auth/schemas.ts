@@ -1,19 +1,19 @@
 import { z } from "zod";
 
 export const loginSchema = z.object({
-  email: z.string().email("Enter a valid email address."),
-  password: z.string().min(8, "Password must be at least 8 characters."),
+  email: z.string().email("Masukkan alamat email yang valid."),
+  password: z.string().min(8, "Kata sandi minimal 8 karakter."),
 });
 
 export const registerSchema = z
   .object({
-    name: z.string().min(2, "Please enter your name.").max(80),
-    email: z.string().email("Enter a valid email address."),
-    password: z.string().min(8, "Password must be at least 8 characters."),
+    name: z.string().min(2, "Silakan masukkan nama Anda.").max(80),
+    email: z.string().email("Masukkan alamat email yang valid."),
+    password: z.string().min(8, "Kata sandi minimal 8 karakter."),
     confirmPassword: z.string().min(8),
   })
   .refine((data) => data.password === data.confirmPassword, {
-    message: "Passwords do not match.",
+    message: "Kata sandi tidak cocok.",
     path: ["confirmPassword"],
   });
 

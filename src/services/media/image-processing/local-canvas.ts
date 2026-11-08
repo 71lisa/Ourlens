@@ -2,110 +2,22 @@ import { PHOTO_FILTERS, PHOTO_FRAMES } from "@/features/memories/media-studio-co
 import type { ImageEditOptions, ImageProcessingService } from "./types";
 
 const MAX_OUTPUT_DIMENSION = 1800;
-const JPEG_QUALITY = 0.86;
+const JPEG_QUALITY = 0.88;
 
-type PhotoRect = { x: number; y: number; width: number; height: number };
+type FrameInsets = { left: number; top: number; right: number; bottom: number };
 
-function framePhotoRect(frame: ImageEditOptions["frame"], width: number, height: number): PhotoRect {
+function frameInsets(frame: ImageEditOptions["frame"], width: number, height: number): FrameInsets {
+  const scale = Math.min(width, height);
   switch (frame) {
-    case "minimal":
-      return { x: width * 0.035, y: height * 0.035, width: width * 0.93, height: height * 0.93 };
-    case "polaroid":
-      return { x: width * 0.07, y: height * 0.06, width: width * 0.86, height: height * 0.72 };
-    case "film-strip":
-      return { x: width * 0.13, y: height * 0.04, width: width * 0.74, height: height * 0.92 };
-    case "wedding":
-    case "celebration":
-      return { x: width * 0.07, y: height * 0.07, width: width * 0.86, height: height * 0.86 };
+    case "POLAROID_WHITE":
+    case "POLAROID_VINTAGE":
+      return { left: scale * 0.055, top: scale * 0.055, right: scale * 0.055, bottom: scale * 0.2 };
+    case "FILM_FRAME":
+      return { left: scale * 0.09, top: scale * 0.04, right: scale * 0.09, bottom: scale * 0.15 };
+    case "MINIMAL_FRAME":
+      return { left: scale * 0.025, top: scale * 0.025, right: scale * 0.025, bottom: scale * 0.13 };
     default:
-      return { x: 0, y: 0, width, height };
-  }
-}
-
-function paintFrame(
-  context: CanvasRenderingContext2D,
-  frame: ImageEditOptions["frame"],
-  width: number,
-  height: number,
-): void {
-  const minDimension = Math.min(width, height);
-  const photo = framePhotoRect(frame, width, height);
-
-  if (frame === "minimal" || frame === "polaroid") {
-    context.fillStyle = frame === "polaroid" ? "#fffdf9" : "#f7f1ea";
-    context.fillRect(0, 0, width, height);
-    return;
-  }
-
-  if (frame === "film-strip") {
-    context.fillStyle = "#2e2e2e";
-    context.fillRect(0, 0, width, height);
-    context.fillStyle = "#d4a37c";
-    const holeWidth = width * 0.045;
-    const holeHeight = height * 0.055;
-    for (let y = height * 0.04; y < height * 0.94; y += height * 0.12) {
-      context.fillRect(width * 0.04, y, holeWidth, holeHeight);
-      context.fillRect(width * 0.915, y, holeWidth, holeHeight);
-    }
-    return;
-  }
-
-  if (frame === "wedding" || frame === "celebration") {
-    context.fillStyle = "#f7f1ea";
-    context.fillRect(0, 0, width, height);
-    return;
-  }
-
-  if (frame === "none") return;
-
-  context.strokeStyle = frame === "wedding" ? "#8b0000" : "#d9a6a8";
-  context.lineWidth = Math.max(2, minDimension * 0.009);
-  context.strokeRect(photo.x / 2, photo.y / 2, width - photo.x, height - photo.y);
-}
-
-function decorateFrame(
-  context: CanvasRenderingContext2D,
-  frame: ImageEditOptions["frame"],
-  width: number,
-  height: number,
-): void {
-  const minDimension = Math.min(width, height);
-  const photo = framePhotoRect(frame, width, height);
-
-  if (frame === "minimal") {
-    context.strokeStyle = "#d4a37c";
-    context.lineWidth = Math.max(2, minDimension * 0.004);
-    context.strokeRect(photo.x / 2, photo.y / 2, width - photo.x, height - photo.y);
-  }
-
-  if (frame === "wedding") {
-    context.strokeStyle = "#8b0000";
-    context.lineWidth = Math.max(2, minDimension * 0.004);
-    context.strokeRect(photo.x * 0.38, photo.y * 0.38, width - photo.x * 0.76, height - photo.y * 0.76);
-    context.fillStyle = "#d4a37c";
-    const radius = minDimension * 0.012;
-    for (const [x, y] of [[photo.x * 0.38, photo.y * 0.38], [width - photo.x * 0.38, photo.y * 0.38], [photo.x * 0.38, height - photo.y * 0.38], [width - photo.x * 0.38, height - photo.y * 0.38]]) {
-      context.beginPath();
-      context.arc(x, y, radius, 0, Math.PI * 2);
-      context.fill();
-    }
-  }
-
-  if (frame === "celebration") {
-    const radius = minDimension * 0.018;
-    const colors = ["#8b0000", "#d4a37c", "#d9a6a8"];
-    const points = [
-      [photo.x * 0.52, photo.y * 0.52],
-      [width - photo.x * 0.52, photo.y * 0.52],
-      [photo.x * 0.52, height - photo.y * 0.52],
-      [width - photo.x * 0.52, height - photo.y * 0.52],
-    ];
-    points.forEach(([x, y], index) => {
-      context.fillStyle = colors[index % colors.length];
-      context.beginPath();
-      context.arc(x, y, radius, 0, Math.PI * 2);
-      context.fill();
-    });
+      return { left: 0, top: 0, right: 0, bottom: 0 };
   }
 }
 
@@ -116,7 +28,7 @@ function loadImage(source: File): Promise<{ image: HTMLImageElement; url: string
     image.onload = () => resolve({ image, url });
     image.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error("This photo could not be opened. Choose another image."));
+      reject(new Error("Foto tidak dapat dibuka. Pilih gambar lain."));
     };
     image.src = url;
   });
@@ -125,7 +37,7 @@ function loadImage(source: File): Promise<{ image: HTMLImageElement; url: string
 function canvasToJpeg(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
-      (blob) => blob ? resolve(blob) : reject(new Error("This photo could not be prepared. Try another image.")),
+      (blob) => blob ? resolve(blob) : reject(new Error("Foto tidak dapat disiapkan. Pilih gambar lain.")),
       "image/jpeg",
       JPEG_QUALITY,
     );
@@ -136,28 +48,61 @@ export class LocalCanvasImageProcessingService implements ImageProcessingService
   async renderPhoto(source: File, options: ImageEditOptions): Promise<Blob> {
     const filter = PHOTO_FILTERS.find((item) => item.id === options.filter);
     const frame = PHOTO_FRAMES.find((item) => item.id === options.frame);
-    if (!filter || !frame) throw new Error("Choose a valid photo treatment.");
+    if (!filter || !frame) throw new Error("Pilih gaya foto yang valid.");
 
     const { image, url } = await loadImage(source);
     try {
       const scale = Math.min(1, MAX_OUTPUT_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight));
-      const width = Math.max(1, Math.round(image.naturalWidth * scale));
-      const height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const photoWidth = Math.max(1, Math.round(image.naturalWidth * scale));
+      const photoHeight = Math.max(1, Math.round(image.naturalHeight * scale));
+      const insets = frameInsets(options.frame, photoWidth, photoHeight);
+      const width = Math.round(photoWidth + insets.left + insets.right);
+      const height = Math.round(photoHeight + insets.top + insets.bottom);
       const canvas = document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
       const context = canvas.getContext("2d", { alpha: false });
-      if (!context) throw new Error("Photo editing is not available in this browser.");
+      if (!context) throw new Error("Penyuntingan foto tidak tersedia di peramban ini.");
 
-      paintFrame(context, options.frame, width, height);
-      const photo = framePhotoRect(options.frame, width, height);
+      context.fillStyle = options.frame === "FILM_FRAME"
+        ? "#29251f"
+        : options.frame === "POLAROID_VINTAGE"
+          ? "#eee3cf"
+          : options.frame === "POLAROID_WHITE"
+            ? "#fffdf9"
+            : "#f7f1ea";
+      context.fillRect(0, 0, width, height);
       context.filter = [
         filter.cssFilter,
         options.enhanced ? "brightness(1.06) contrast(1.1) saturate(1.08)" : "",
       ].filter(Boolean).join(" ");
-      context.drawImage(image, photo.x, photo.y, photo.width, photo.height);
+      context.drawImage(image, insets.left, insets.top, photoWidth, photoHeight);
       context.filter = "none";
-      decorateFrame(context, options.frame, width, height);
+
+      if (options.frame === "FILM_FRAME") {
+        context.fillStyle = "#e7d6b7";
+        const holeWidth = Math.max(8, width * 0.035);
+        const holeHeight = Math.max(8, height * 0.035);
+        for (let y = height * 0.035; y < height * 0.9; y += height * 0.1) {
+          context.fillRect(width * 0.025, y, holeWidth, holeHeight);
+          context.fillRect(width * 0.94, y, holeWidth, holeHeight);
+        }
+      } else if (options.frame === "MINIMAL_FRAME") {
+        context.strokeStyle = "#d4a37c";
+        context.lineWidth = Math.max(2, Math.min(width, height) * 0.004);
+        context.strokeRect(insets.left / 2, insets.top / 2, width - insets.left, height - insets.top);
+      }
+
+      if (options.frame !== "NO_FRAME") {
+        const labelY = height - insets.bottom * 0.6;
+        context.textAlign = "center";
+        context.fillStyle = options.frame === "FILM_FRAME" ? "#f5ead6" : "#453d35";
+        context.font = `600 ${Math.max(14, Math.min(width, height) * 0.035)}px Georgia, serif`;
+        context.fillText(options.eventName, width / 2, labelY, width * 0.82);
+        context.font = `${Math.max(11, Math.min(width, height) * 0.022)}px Arial, sans-serif`;
+        context.fillText(options.eventDate, width / 2, labelY + Math.max(16, Math.min(width, height) * 0.045), width * 0.82);
+      }
+
       return await canvasToJpeg(canvas);
     } finally {
       URL.revokeObjectURL(url);

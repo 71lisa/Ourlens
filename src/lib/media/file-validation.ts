@@ -39,23 +39,23 @@ export function validateMediaFile(input: FileValidationInput): {
   error?: string;
 } {
   if (input.fileSize <= 0) {
-    return { ok: false, error: "The file is empty." };
+    return { ok: false, error: "Berkas kosong." };
   }
   const maxBytes = input.kind === "photo" ? MAX_PHOTO_UPLOAD_BYTES : MAX_VIDEO_UPLOAD_BYTES;
   if (input.fileSize > maxBytes) {
-    return { ok: false, error: "This file is larger than the event allows." };
+    return { ok: false, error: "Ukuran berkas melebihi batas acara." };
   }
 
   const allowed =
     input.kind === "photo" ? ALLOWED_PHOTO_TYPES : ALLOWED_VIDEO_TYPES;
   if (!allowed.has(input.mimeType.toLowerCase())) {
-    return { ok: false, error: "This file type is not supported." };
+    return { ok: false, error: "Jenis berkas ini tidak didukung." };
   }
   if (
     input.fileName &&
     !hasAllowedMediaExtension(input.fileName, input.mimeType.toLowerCase(), input.kind)
   ) {
-    return { ok: false, error: "The file extension does not match its media type." };
+    return { ok: false, error: "Ekstensi berkas tidak sesuai dengan jenis medianya." };
   }
 
   return { ok: true };
@@ -244,7 +244,7 @@ export function validateVideoPayload(input: {
   const declaredType = (input.mimeType || "").toLowerCase();
   const detectedMimeType = detectVideoMimeType(input.bytes);
   if (!detectedMimeType || !ALLOWED_VIDEO_TYPES.has(declaredType) || detectedMimeType !== declaredType) {
-    return { ok: false, error: "Choose a valid MP4 or MOV video." };
+    return { ok: false, error: "Pilih video MP4 atau MOV yang valid." };
   }
 
   const validation = validateMediaFile({
@@ -253,17 +253,20 @@ export function validateVideoPayload(input: {
     kind: "video",
     fileName: input.fileName,
   });
-  if (!validation.ok) return { ok: false, error: validation.error ?? "This video is not valid." };
+  if (!validation.ok) return { ok: false, error: validation.error ?? "Video ini tidak valid." };
 
   const durationSeconds = readVideoDurationSeconds(input.bytes);
   if (durationSeconds === undefined) {
-    return { ok: false, error: "The video duration could not be verified." };
+    return { ok: false, error: "Durasi video tidak dapat diverifikasi." };
   }
   if (!Number.isFinite(input.maxDurationSeconds) || input.maxDurationSeconds <= 0) {
-    return { ok: false, error: "Video uploads are not configured for this event." };
+    return { ok: false, error: "Unggahan video belum diaktifkan untuk acara ini." };
   }
   if (durationSeconds > input.maxDurationSeconds) {
-    return { ok: false, error: `This video is longer than the event allows (${input.maxDurationSeconds} seconds).` };
+    return {
+      ok: false,
+      error: `Durasi video melebihi batas acara (${input.maxDurationSeconds} detik).`,
+    };
   }
 
   return { ok: true, mimeType: detectedMimeType, durationSeconds };
@@ -277,7 +280,7 @@ export function validatePhotoPayload(input: {
 }): { ok: true; mimeType: string } | { ok: false; error: string } {
   const detectedMimeType = detectPhotoMimeType(input.bytes);
   if (!detectedMimeType || (input.mimeType && detectedMimeType !== input.mimeType.toLowerCase())) {
-    return { ok: false, error: "The selected file is not a supported JPG, PNG, or WebP photo." };
+    return { ok: false, error: "Berkas yang dipilih bukan foto JPG, PNG, atau WebP yang didukung." };
   }
 
   const validation = validateMediaFile({
@@ -286,6 +289,6 @@ export function validatePhotoPayload(input: {
     kind: "photo",
     fileName: input.fileName,
   });
-  if (!validation.ok) return { ok: false, error: validation.error ?? "This photo is not valid." };
+  if (!validation.ok) return { ok: false, error: validation.error ?? "Foto ini tidak valid." };
   return { ok: true, mimeType: detectedMimeType };
 }

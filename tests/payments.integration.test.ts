@@ -18,6 +18,7 @@ describe.skipIf(!databaseAvailable)("PostgreSQL business payments integration", 
   const suffix = crypto.randomUUID();
   const eventIds: string[] = [];
   const orderIds: string[] = [];
+  const partnerAccountIds: string[] = [];
   const catalogPackages: Awaited<ReturnType<typeof getActivePackages>> = [];
   let ownerId = "";
   let packageId = "";
@@ -126,6 +127,8 @@ describe.skipIf(!databaseAvailable)("PostgreSQL business payments integration", 
     packageRecord = await prisma.package.create({
       data: {
         name: `Integration ${suffix}`,
+        guestCapacity: 5,
+        isUnlimited: false,
         price: 25000,
         currency: "IDR",
         storageLimitBytes: 123456789n,
@@ -144,6 +147,7 @@ describe.skipIf(!databaseAvailable)("PostgreSQL business payments integration", 
     if (!databaseAvailable) return;
     if (orderIds.length) await prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     if (eventIds.length) await prisma.event.deleteMany({ where: { id: { in: eventIds } } });
+    if (partnerAccountIds.length) await prisma.partnerAccount.deleteMany({ where: { id: { in: partnerAccountIds } } });
     if (packageId) await prisma.package.deleteMany({ where: { id: packageId } });
     if (ownerId) await prisma.user.deleteMany({ where: { id: ownerId } });
     await prisma.$disconnect();
@@ -220,6 +224,41 @@ describe.skipIf(!databaseAvailable)("PostgreSQL business payments integration", 
     const event = await prisma.event.findUniqueOrThrow({
       where: { id: order.eventId! },
       select: { slug: true },
+    });
+
+    it("counts a verified partner payment once and never lowers the earned tier after a refund", async () => {
+      const account = await prisma.partnerAccount.create({
+        data: {
+          userId: ownerId,
+          businessName: `Partner ${suffix}`,
+          status: "ACTIVE",
+        },
+      });
+      partnerAccountIds.push(account.id);
+      const order = await createScenario("Partner settlement event");
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { partnerAccountId: account.id, clientName: "Integration client" },
+      });
+
+      stubStatusResponse(order.orderNumber, "settlement");
+      expect((await sendNotification(order.orderNumber, "settlement")).status).toBe(200);
+      expect((await sendNotification(order.orderNumber, "settlement")).status).toBe(200);
+      let [paidOrder, paidPartner] = await Promise.all([
+        prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+        prisma.partnerAccount.findUniqueOrThrow({ where: { id: account.id } }),
+      ]);
+      expect(paidPartner.paidOrderCount).toBe(1);
+      expect(paidOrder.tierCountedAt).not.toBeNull();
+
+      stubStatusResponse(order.orderNumber, "refund");
+      expect((await sendNotification(order.orderNumber, "refund")).status).toBe(200);
+      [paidOrder, paidPartner] = await Promise.all([
+        prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+        prisma.partnerAccount.findUniqueOrThrow({ where: { id: account.id } }),
+      ]);
+      expect(paidOrder.status).toBe("REFUNDED");
+      expect(paidPartner.paidOrderCount).toBe(1);
     });
     const guestSessionResponse = await createGuestSession(
       new Request(`http://localhost/api/events/${event.slug}/guest-session`, { method: "POST" }),

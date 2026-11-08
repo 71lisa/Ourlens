@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { uniqueEventSlug, slugifyEventName } from "@/lib/slug";
 import { createEventSchema } from "@/features/events/schema";
-import { hashGuestToken, readGuestToken } from "@/lib/guest-token";
+import { hashGuestToken, readGuestToken, shouldUseSecureGuestCookie } from "@/lib/guest-token";
 import {
   detectPhotoMimeType,
   hasAllowedMediaExtension,
@@ -48,7 +48,51 @@ describe("event creation validation", () => {
     });
 
     expect(result.success).toBe(true);
-    if (result.success) expect(result.data.coverImageUrl).toBeUndefined();
+    if (result.success) {
+      expect(result.data.coverImageUrl).toBeUndefined();
+      expect(result.data.filter).toBe("ORIGINAL");
+      expect(result.data.frame).toBe("NO_FRAME");
+    }
+  });
+
+  it("accepts selected filter and frame as part of event creation", () => {
+    const result = createEventSchema.safeParse({
+      name: "Celebration",
+      eventType: "BIRTHDAY",
+      eventDate: "2027-06-12",
+      startTime: "17:00",
+      endDate: "2027-06-12",
+      endTime: "23:00",
+      timeZone: "Asia/Jakarta",
+      privacyMode: "PUBLIC_LINK",
+      packageId: "package-id",
+      filter: "DISPOSABLE_CAM",
+      frame: "POLAROID_WHITE",
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.filter).toBe("DISPOSABLE_CAM");
+      expect(result.data.frame).toBe("POLAROID_WHITE");
+    }
+  });
+
+  it("rejects unsupported photo experience choices", () => {
+    const result = createEventSchema.safeParse({
+      name: "Celebration",
+      eventType: "BIRTHDAY",
+      eventDate: "2027-06-12",
+      startTime: "17:00",
+      endDate: "2027-06-12",
+      endTime: "23:00",
+      timeZone: "Asia/Jakarta",
+      privacyMode: "PUBLIC_LINK",
+      packageId: "package-id",
+      filter: "UNSUPPORTED",
+      frame: "UNSUPPORTED",
+    });
+
+    expect(result.success).toBe(false);
   });
 
   it("rejects invalid time zones and non-increasing event schedules", () => {
@@ -65,6 +109,19 @@ describe("event creation validation", () => {
     };
     expect(createEventSchema.safeParse({ ...base, timeZone: "not/a-zone" }).success).toBe(false);
     expect(createEventSchema.safeParse({ ...base, endTime: "16:00" }).success).toBe(false);
+  });
+});
+
+describe("guest session cookies", () => {
+  it("uses a secure cookie for HTTPS, including HTTPS behind a proxy", () => {
+    expect(shouldUseSecureGuestCookie(new Request("https://ourlens.test/api/events/event/guest-session"))).toBe(true);
+    expect(shouldUseSecureGuestCookie(new Request("http://ourlens.test/api/events/event/guest-session", {
+      headers: { "x-forwarded-proto": "https" },
+    }))).toBe(true);
+  });
+
+  it("allows guest sessions over HTTP for local-network access", () => {
+    expect(shouldUseSecureGuestCookie(new Request("http://192.168.1.8:3000/api/events/event/guest-session"))).toBe(false);
   });
 });
 
@@ -92,20 +149,31 @@ describe("event URL slugs", () => {
 
 describe("guest session", () => {
   it("creates a random token and reuses it for the same active event session", async () => {
-    const records = new Map<string, { id: string; expiresAt: Date }>();
+    const records = new Map<string, { id: string; expiresAt: Date; displayName: string | null }>();
     const store = {
       async findValid(eventId: string, tokenHash: string, now: Date) {
         const record = records.get(`${eventId}:${tokenHash}`);
         return record && record.expiresAt > now ? record : null;
       },
-      async create(eventId: string, tokenHash: string, expiresAt: Date) {
-        const record = { id: "session-id", expiresAt };
+      async updateDisplayName(sessionId: string, displayName: string) {
+        const record = [...records.values()].find((item) => item.id === sessionId);
+        if (!record) throw new Error("Session not found");
+        record.displayName = displayName;
+        return record;
+      },
+      async create(eventId: string, tokenHash: string, expiresAt: Date, displayName: string) {
+        const record = { id: "session-id", expiresAt, displayName };
         records.set(`${eventId}:${tokenHash}`, record);
         return record;
       },
     };
     const now = new Date("2026-09-27T00:00:00.000Z");
-    const created = await getOrCreateGuestSession({ eventId: "event-1", store, now });
+    const created = await getOrCreateGuestSession({
+      eventId: "event-1",
+      displayName: "Audrey",
+      store,
+      now,
+    });
     const reused = await getOrCreateGuestSession({
       eventId: "event-1",
       existingToken: created.token,
@@ -121,6 +189,57 @@ describe("guest session", () => {
     }), "event-1")).toBe(created.token);
     expect(reused.reused).toBe(true);
     expect(reused.session.id).toBe(created.session.id);
+    expect(reused.session.displayName).toBe("Audrey");
+  });
+
+  it("requires a guest name before creating a session", async () => {
+    const store = {
+      async findValid() {
+        return null;
+      },
+      async create() {
+        throw new Error("A session should not be created without a name");
+      },
+    };
+
+    await expect(getOrCreateGuestSession({ eventId: "event-1", store }))
+      .rejects.toThrow("A guest name is required before creating a session.");
+  });
+
+  it("rejects a new guest session when the purchased capacity is full", async () => {
+    let guestCount = 0;
+    const store = {
+      async findValid() {
+        return null;
+      },
+      async create(
+        _eventId: string,
+        _tokenHash: string,
+        expiresAt: Date,
+        displayName: string,
+        capacity?: number | null,
+      ) {
+        if (capacity !== undefined && capacity !== null && guestCount >= capacity) return null;
+        guestCount += 1;
+        return { id: `session-${guestCount}`, expiresAt, displayName };
+      },
+    };
+
+    await getOrCreateGuestSession({
+      eventId: "event-1",
+      store,
+      displayName: "Audrey",
+      guestCapacity: 1,
+    });
+    await expect(
+      getOrCreateGuestSession({
+        eventId: "event-1",
+        store,
+        displayName: "Guest 2",
+        guestCapacity: 1,
+      }),
+    ).rejects.toThrow("The event has reached its guest capacity.");
+    expect(guestCount).toBe(1);
   });
 });
 
@@ -172,7 +291,7 @@ describe("photo upload rules", () => {
     expect(canAcceptUpload({ quotaBytes: 100n, usedBytes: 80n }, 21n)).toBe(false);
   });
 
-  it("creates photo metadata linked to the event and guest session as pending review", () => {
+  it("creates photo metadata linked to the event and guest session as published", () => {
     const input = buildMemoryCreateInput({
       eventId: "event-id",
       guestSessionId: "session-id",
@@ -187,7 +306,7 @@ describe("photo upload rules", () => {
     expect(input.guestSession).toEqual({ connect: { id: "session-id" } });
     expect(input.mediaAssets?.create).toMatchObject({
       type: "PHOTO",
-      moderationStatus: "PENDING",
+      moderationStatus: "APPROVED",
       originalStorageKey: "events/event-id/photo.jpg",
     });
   });
@@ -206,12 +325,12 @@ describe("photo upload rules", () => {
     expect(input.mediaAssets?.create).toMatchObject({
       originalStorageKey: "events/event-id/source.jpg",
       optimizedStorageKey: "events/event-id/edited.jpg",
-      moderationStatus: "PENDING",
+      moderationStatus: "APPROVED",
       idempotencyKey: "715dfd11-bb90-4a1f-a0d0-0183ceec6b8f",
     });
   });
 
-  it("creates video metadata with a verified duration and pending moderation", () => {
+  it("preserves media metadata compatibility for existing video records", () => {
     const input = buildMemoryCreateInput({
       eventId: "event-id",
       guestSessionId: "session-id",
@@ -226,32 +345,30 @@ describe("photo upload rules", () => {
     expect(input.mediaAssets?.create).toMatchObject({
       type: "VIDEO",
       duration: 7.5,
-      moderationStatus: "PENDING",
+      moderationStatus: "APPROVED",
       originalStorageKey: "events/event-id/video.mov",
     });
   });
 });
 
-describe("Media Studio presets", () => {
-  it("defines the six requested reusable filters", () => {
+describe("Event photo experience presets", () => {
+  it("defines the five organizer-controlled filters", () => {
     expect(PHOTO_FILTERS.map((filter) => filter.name)).toEqual([
-      "Original",
-      "Warm",
-      "Soft",
-      "Vintage",
-      "Film",
-      "Black & White",
+      "Asli",
+      "Kamera Sekali Pakai",
+      "Film Klasik",
+      "Retro",
+      "Klasik",
     ]);
   });
 
-  it("defines reusable no-frame, editorial, and celebration frames", () => {
+  it("defines the five organizer-controlled frames", () => {
     expect(PHOTO_FRAMES.map((frame) => frame.name)).toEqual([
-      "No Frame",
-      "Minimal",
-      "Polaroid",
-      "Film Strip",
-      "Wedding",
-      "Celebration",
+      "Tanpa Bingkai",
+      "Polaroid Putih",
+      "Polaroid Klasik",
+      "Bingkai Film",
+      "Bingkai Minimalis",
     ]);
     expect(new Set(PHOTO_FRAMES.map((frame) => frame.id)).size).toBe(PHOTO_FRAMES.length);
   });
@@ -333,6 +450,30 @@ describe("guest event access", () => {
     expect(isRetainedMediaAvailable(null, now)).toBe(true);
     expect(isRetainedMediaAvailable(new Date(now.getTime() - 1), now)).toBe(false);
     expect(isRetainedMediaAvailable(new Date(now.getTime() + 1), now)).toBe(true);
+  });
+
+  it("allows an unpaid trial event to accept photos and expose its public gallery without an end date", () => {
+    const now = new Date("2026-11-02T00:00:00.000Z");
+    const trial = {
+      privacyMode: "PUBLIC_LINK" as const,
+      status: "LIVE" as const,
+      isPaid: false,
+      isTrial: true,
+      expiresAt: null,
+      startsAt: now,
+      endsAt: null,
+      timeZone: "Asia/Jakarta",
+    };
+
+    expect(canAccessGuestEventPage(trial)).toBe(true);
+    expect(canViewEventGallery(trial)).toBe(true);
+    expect(canAcceptGuestContributions(trial, now)).toBe(true);
+    expect(canAcceptGuestContributions({ ...trial, status: "DRAFT" }, now)).toBe(false);
+    expect(canViewEventGallery({ ...trial, privacyMode: "PRIVATE" })).toBe(false);
+    expect(canAcceptGuestContributions({
+      ...trial,
+      expiresAt: new Date(now.getTime() - 1),
+    }, now)).toBe(false);
   });
 
   it("builds and validates safe storage keys", () => {

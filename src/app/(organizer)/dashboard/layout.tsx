@@ -5,10 +5,12 @@ import { LogoutButton } from "@/components/layout/logout-button";
 import { redirect } from "next/navigation";
 
 const links = [
-  { href: "/dashboard", label: "Overview" },
-  { href: "/dashboard/events", label: "Events" },
-  { href: "/dashboard/events/create", label: "Create event" },
-  { href: "/dashboard/transactions", label: "Transactions" },
+  { href: "/dashboard", label: "Dasbor" },
+  { href: "/dashboard/events", label: "Acara" },
+  { href: "/dashboard/events/create", label: "Buat acara" },
+  { href: "/dashboard/transactions", label: "Transaksi" },
+  { href: "/dashboard/referrals", label: "Referral & voucher" },
+  { href: "/dashboard/trial", label: "Uji coba gratis" },
 ];
 
 export default async function DashboardLayout({
@@ -17,9 +19,10 @@ export default async function DashboardLayout({
   children: React.ReactNode;
 }) {
   const session = await auth();
-  if (!session?.user || !["ADMIN", "ORGANIZER"].includes(session.user.role)) {
-    redirect("/login");
-  }
+  if (!session?.user) redirect("/login");
+  if (session.user.role === "ADMIN") redirect("/admin");
+  if (session.user.role === "PARTNER") redirect("/partner");
+  if (session.user.role !== "ORGANIZER") redirect("/login");
 
   return (
     <div className="flex min-h-full flex-1 flex-col md:flex-row">
@@ -30,7 +33,7 @@ export default async function DashboardLayout({
             <LogoutButton />
           </div>
         </div>
-        <nav aria-label="Organizer" className="flex gap-2 overflow-x-auto px-3 pb-3 md:flex-col md:pb-6">
+        <nav aria-label="Navigasi penyelenggara" className="flex gap-2 overflow-x-auto px-3 pb-3 md:flex-col md:pb-6">
           {links.map((link) => (
             <Link
               key={link.href}
@@ -42,7 +45,9 @@ export default async function DashboardLayout({
           ))}
         </nav>
         <div className="hidden px-3 md:block">
-          <p className="truncate px-3 text-xs text-charcoal/50">{session.user.email}</p>
+          <p className="truncate px-3 text-xs text-charcoal/50">
+            Penyelenggara · {session.user.email}
+          </p>
           <LogoutButton />
         </div>
       </aside>

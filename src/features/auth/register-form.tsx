@@ -7,15 +7,21 @@ import { Input } from "@/components/ui/input";
 
 const initial: AuthActionState = {};
 
-export function RegisterForm() {
+export function RegisterForm({ referralCode = "" }: { referralCode?: string }) {
   const [state, formAction, pending] = useActionState(registerAction, initial);
 
   return (
     <form action={formAction} className="space-y-4">
-      <Input label="Name" name="name" autoComplete="name" required />
+      {referralCode ? <input type="hidden" name="referralCode" value={referralCode} /> : null}
+      {referralCode ? (
+        <p className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          Anda mendaftar melalui tautan referral. Teman Anda akan menerima voucher setelah pembayaran pertama Anda berhasil diverifikasi.
+        </p>
+      ) : null}
+      <Input label="Nama" name="name" autoComplete="name" required />
       <Input label="Email" name="email" type="email" autoComplete="email" required />
       <Input
-        label="Password"
+        label="Kata sandi"
         name="password"
         type="password"
         autoComplete="new-password"
@@ -23,7 +29,7 @@ export function RegisterForm() {
         required
       />
       <Input
-        label="Confirm password"
+        label="Konfirmasi kata sandi"
         name="confirmPassword"
         type="password"
         autoComplete="new-password"
@@ -36,7 +42,7 @@ export function RegisterForm() {
         </p>
       ) : null}
       <Button type="submit" className="w-full" disabled={pending}>
-        {pending ? "Creating account…" : "Create organizer account"}
+        {pending ? "Membuat akun…" : "Buat akun penyelenggara"}
       </Button>
     </form>
   );

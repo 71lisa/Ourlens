@@ -19,7 +19,8 @@ import { prisma } from "@/server/db/prisma";
 import { createPackageSnapshot } from "@/server/packages/snapshot";
 import { getOrganizerOrder } from "@/server/orders/queries";
 import { getStorageService } from "@/services/storage";
-import { moderateMemoryAction } from "@/features/moderation/actions";
+import sharp from "sharp";
+import { renderGuestPhoto } from "@/services/media/image-processing/server";
 import { POST as createGuestSession } from "@/app/api/events/[slug]/guest-session/route";
 import { GET as getPublicMedia } from "@/app/api/events/[slug]/media/[mediaId]/route";
 import { POST as uploadMemory } from "@/app/api/events/[slug]/memories/route";
@@ -164,7 +165,14 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
       },
       body: form,
     });
+
     return uploadMemory(request, { params: Promise.resolve({ slug: requestSlug }) });
+  }
+
+  async function createJpeg() {
+    return new Uint8Array(await sharp({
+      create: { width: 8, height: 8, channels: 3, background: "#d4a37c" },
+    }).jpeg().toBuffer());
   }
 
   beforeAll(async () => {
@@ -178,6 +186,8 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     const packageRecord = await prisma.package.create({
       data: {
         name: `Phase 1 ${suffix}`,
+        guestCapacity: 5,
+        isUnlimited: false,
         price: 25000,
         storageLimitBytes: 1024n * 1024n,
         photoLimit: 20,
@@ -240,10 +250,12 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     await prisma.$disconnect();
   });
 
-  it("writes a photo to PostgreSQL, keeps it pending, and serves it only after approval", async () => {
+  it("writes a guest photo as published and serves it immediately without an account", async () => {
+    authState.userId = "";
+    const photo = await createJpeg();
     const response = await postUpload({
       kind: "photo",
-      bytes: new Uint8Array([0xff, 0xd8, 0xff]),
+      bytes: photo,
       mimeType: "image/jpeg",
     });
     expect(response.status).toBe(201);
@@ -252,68 +264,45 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     expect(asset).toMatchObject({
       type: "PHOTO",
       uploadStatus: "COMPLETE",
-      moderationStatus: "PENDING",
+      moderationStatus: "APPROVED",
     });
     expect(asset.memoryId).toBeTruthy();
-    const pending = await getPublicMedia(new Request("http://localhost"), {
+    const published = await getPublicMedia(new Request("http://localhost"), {
       params: Promise.resolve({ slug, mediaId: asset.id }),
     });
-    expect(pending.status).toBe(404);
-    authState.userId = ownerId;
-    const formData = new FormData();
-    formData.set("eventId", eventId);
-    formData.set("mediaAssetId", asset.id);
-    formData.set("decision", "APPROVED");
-    const approval = await moderateMemoryAction({}, formData);
-    expect(approval.success).toBe("Memory approved.");
-
-    const approved = await getPublicMedia(new Request("http://localhost"), {
-      params: Promise.resolve({ slug, mediaId: asset.id }),
-    });
-    expect(approved.status).toBe(200);
+    expect(published.status).toBe(200);
   });
 
-  it("stores real video metadata and updates only the video quota counter", async () => {
+  it("rejects video uploads from the guest photo endpoint", async () => {
     const video = mp4WithDuration(8);
     const response = await postUpload({
       kind: "video",
       bytes: video,
       mimeType: "video/mp4",
     });
-    expect(response.status).toBe(201);
-
-    const asset = await prisma.mediaAsset.findFirstOrThrow({ where: { eventId } });
+    expect(response.status).toBe(400);
     const usage = await prisma.storageUsage.findUniqueOrThrow({ where: { eventId } });
-    expect(asset.type).toBe("VIDEO");
-    expect(asset.duration).toBe(8);
-    expect(asset.moderationStatus).toBe("PENDING");
-    expect(usage.videoBytes).toBe(BigInt(video.length));
+    expect(await prisma.mediaAsset.count({ where: { eventId } })).toBe(0);
+    expect(usage.videoBytes).toBe(0n);
     expect(usage.photoBytes).toBe(0n);
-    const pending = await getPublicMedia(new Request("http://localhost"), {
-      params: Promise.resolve({ slug, mediaId: asset.id }),
-    });
-    expect(pending.status).toBe(404);
-    authState.userId = ownerId;
-    const formData = new FormData();
-    formData.set("eventId", eventId);
-    formData.set("mediaAssetId", asset.id);
-    formData.set("decision", "APPROVED");
-    expect((await moderateMemoryAction({}, formData)).success).toBe("Memory approved.");
-    const approved = await getPublicMedia(new Request("http://localhost"), {
-      params: Promise.resolve({ slug, mediaId: asset.id }),
-    });
-    expect(approved.status).toBe(200);
-    expect(approved.headers.get("content-type")).toBe("video/mp4");
   });
 
   it("serializes concurrent quota reservations and persists idempotent retry results", async () => {
+    const photo = await createJpeg();
+    const processed = await renderGuestPhoto({
+      bytes: photo,
+      filter: "ORIGINAL",
+      frame: "NO_FRAME",
+      eventName: "Phase 1 integration event",
+      eventDate: new Date("2026-11-02T12:00:00.000Z"),
+    });
     await prisma.storageUsage.update({
       where: { eventId },
-      data: { quotaBytes: 3n },
+      data: { quotaBytes: BigInt(photo.byteLength + processed.byteLength) },
     });
     const requests = await Promise.all([
-      postUpload({ kind: "photo", bytes: new Uint8Array([0xff, 0xd8, 0xff]), mimeType: "image/jpeg" }),
-      postUpload({ kind: "photo", bytes: new Uint8Array([0xff, 0xd8, 0xff]), mimeType: "image/jpeg" }),
+      postUpload({ kind: "photo", bytes: photo, mimeType: "image/jpeg" }),
+      postUpload({ kind: "photo", bytes: photo, mimeType: "image/jpeg" }),
     ]);
     expect(requests.map((response) => response.status).sort()).toEqual([201, 413]);
     expect(await prisma.mediaAsset.count({ where: { eventId } })).toBe(1);
@@ -326,7 +315,7 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     const idempotencyKey = crypto.randomUUID();
     const payload = {
       kind: "photo" as const,
-      bytes: new Uint8Array([0xff, 0xd8, 0xff]),
+      bytes: await createJpeg(),
       mimeType: "image/jpeg",
       idempotencyKey,
     };
@@ -363,7 +352,7 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     });
     const crossEventResponse = await postUpload({
       kind: "photo",
-      bytes: new Uint8Array([0xff, 0xd8, 0xff]),
+      bytes: await createJpeg(),
       mimeType: "image/jpeg",
       requestToken: otherToken,
     });
@@ -375,7 +364,7 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     });
     const upcomingResponse = await postUpload({
       kind: "photo",
-      bytes: new Uint8Array([0xff, 0xd8, 0xff]),
+      bytes: await createJpeg(),
       mimeType: "image/jpeg",
     });
     expect(upcomingResponse.status).toBe(404);
@@ -386,7 +375,8 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     const activeResponse = await createGuestSession(
       new Request(`http://localhost/api/events/${slug}/guest-session`, {
         method: "POST",
-        headers: { origin: "http://localhost" },
+        headers: { origin: "http://localhost", "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Integration guest" }),
       }),
       { params: Promise.resolve({ slug }) },
     );
@@ -421,6 +411,8 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     formData.set("timeZone", "Asia/Jakarta");
     formData.set("privacyMode", "PUBLIC_LINK");
     formData.set("packageId", packageId);
+    formData.set("photoFilter", "DISPOSABLE_CAM");
+    formData.set("photoFrame", "POLAROID_WHITE");
     const idempotencyKey = crypto.randomUUID();
     formData.set("idempotencyKey", idempotencyKey);
 
@@ -442,13 +434,17 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
 
     const createdEvent = await prisma.event.findFirstOrThrow({
       where: { ownerId, name: `Phase 1 Created Event ${suffix}` },
-      include: { qrCode: true, storageUsage: true },
+      include: { qrCode: true, storageUsage: true, photoExperience: true },
     });
     createdEventIds.push(createdEvent.id);
     expect(createdEvent.status).toBe("DRAFT");
     expect(createdEvent.startsAt?.toISOString()).toBe("2027-06-12T10:00:00.000Z");
     expect(createdEvent.timeZone).toBe("Asia/Jakarta");
     expect(createdEvent.qrCode?.destinationUrl).toContain(`/e/${createdEvent.slug}`);
+    expect(createdEvent.photoExperience).toMatchObject({
+      filter: "DISPOSABLE_CAM",
+      frame: "POLAROID_WHITE",
+    });
     expect(createdEvent.storageUsage).toBeNull();
     const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
     expect(order).toMatchObject({ status: "PENDING", idempotencyKey, currency: "IDR" });
@@ -484,7 +480,7 @@ describe.skipIf(!databaseAvailable)("PostgreSQL guest upload integration", () =>
     scheduleForm.set("endTime", "23:00");
     scheduleForm.set("timeZone", "Asia/Jakarta");
     expect((await updateEventScheduleAction({}, scheduleForm)).success)
-      .toBe("Event schedule updated.");
+      .toBe("Jadwal acara berhasil diperbarui.");
     const updatedEvent = await prisma.event.findUniqueOrThrow({ where: { id: createdEvent.id } });
     expect(updatedEvent.startsAt?.toISOString()).toBe("2027-06-13T11:00:00.000Z");
   });

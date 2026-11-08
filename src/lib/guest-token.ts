@@ -8,6 +8,11 @@ export function hashGuestToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+export function shouldUseSecureGuestCookie(request: Request): boolean {
+  const forwardedProtocol = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  return new URL(request.url).protocol === "https:" || forwardedProtocol === "https";
+}
+
 export function readGuestToken(request: Request, slug: string): string | undefined {
   const cookieName = `ourlens_guest_${slug}`;
   const value = request.headers
